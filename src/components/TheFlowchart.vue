@@ -1,7 +1,7 @@
 <template>
   <div ref="container" class="flowchart">
     <InlineSvg
-      src="flowchart.svg"
+      src="flowchart-2.svg"
       :class="{ ready: flowchartElement }"
       @loaded="flowchartReady($event)"
     />
@@ -51,13 +51,18 @@ export default {
       // flowchart scaling parameters
       scaleParameters: {
         domain: [300, 600],
-        range: [0.85, 1],
+        range: [0.025, 0.035],
         minReductionFactor: 0.75
       },
       scaleFromWindowSideLength: undefined,
 
       // coordinates stored during panning/dragging
       panCoordinates: undefined,
+
+      // user-controlled zoom multiplier (scroll-to-zoom)
+      userZoom: 1,
+      userZoomMin: 0.2,
+      userZoomMax: 8,
 
       // parameters for movement/transitions to nodes
       transitionParameters: {
@@ -87,6 +92,10 @@ export default {
     zoomScale() {
       return this.scaleFromWindowSideLength(this.shortestWindowSideLength);
     },
+    // total scale factor combining window-based scale and user-controlled zoom
+    effectiveScale() {
+      return this.zoomScale * this.userZoom;
+    },
     // calculates travel distance threshold below which no movement happens when a new node becomes active during narration
     travelThreshold() {
       return Math.min(
@@ -97,6 +106,13 @@ export default {
   },
 
   methods: {
+    // apply current effective scale to the rendered SVG element
+    applyScale() {
+      if (!this.flowchartElement) return;
+      this.flowchartElement.setAttribute('width', this.flowchartWidth * this.effectiveScale);
+      this.flowchartElement.setAttribute('height', this.flowchartHeight * this.effectiveScale);
+    },
+
     // flowchart inline SVG loaded
     flowchartReady(element) {
       this.flowchartContainer = this.$refs.container;
@@ -113,23 +129,52 @@ export default {
         this.windowHeight = window.innerHeight;
         this.shortestWindowSideLength = Math.min(window.innerWidth, window.innerHeight);
 
-        this.flowchartElement.setAttribute('width', this.flowchartWidth * this.zoomScale);
-        this.flowchartElement.setAttribute('height', this.flowchartHeight * this.zoomScale);
+        this.applyScale();
       });
 
       // dispatch resize event to initially set scaled flowchart width and height
       window.dispatchEvent(new Event('resize'));
 
-      // stop playback and hide chapter list / intro panel upon user-initiated scrolling
-      ['wheel', 'touchmove'].forEach(eventName => {
-        this.flowchartContainer.addEventListener(eventName, () => {
-          if (this.flowchartStore.playbackActive) {
-            this.$emit('startExplorationDuringPlayback');
-          }
-
-          this.$emit('toggleIntroPanel', true);
-        });
+      // stop playback and hide chapter list / intro panel upon touch panning
+      this.flowchartContainer.addEventListener('touchmove', () => {
+        if (this.flowchartStore.playbackActive) {
+          this.$emit('startExplorationDuringPlayback');
+        }
+        this.$emit('toggleIntroPanel', true);
       });
+
+      // wheel = zoom around cursor (replaces native scroll-pan); pan still works via click-drag
+      this.flowchartContainer.addEventListener('wheel', event => {
+        event.preventDefault();
+
+        if (this.flowchartStore.playbackActive) {
+          this.$emit('startExplorationDuringPlayback');
+        }
+        this.$emit('toggleIntroPanel', true);
+
+        const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
+        const oldZoom = this.userZoom;
+        const newZoom = Math.min(Math.max(this.userZoomMin, oldZoom * factor), this.userZoomMax);
+        if (newZoom === oldZoom) return;
+
+        // anchor zoom on cursor: keep the SVG point under the cursor fixed
+        const containerRect = this.flowchartContainer.getBoundingClientRect();
+        const cursorX = event.clientX - containerRect.left;
+        const cursorY = event.clientY - containerRect.top;
+        const ratio = newZoom / oldZoom;
+
+        this.userZoom = newZoom;
+        this.applyScale();
+
+        // SVG sits inside scroll-content with 50vw/50vh CSS margin; that margin is fixed,
+        // so a point at scrollLeft+cursorX in scroll-content corresponds to (… - 50vw) in SVG space
+        const marginX = 0.5 * this.windowWidth;
+        const marginY = 0.5 * this.windowHeight;
+        const svgX = this.flowchartContainer.scrollLeft + cursorX - marginX;
+        const svgY = this.flowchartContainer.scrollTop + cursorY - marginY;
+        this.flowchartContainer.scrollLeft = svgX * ratio + marginX - cursorX;
+        this.flowchartContainer.scrollTop = svgY * ratio + marginY - cursorY;
+      }, { passive: false });
 
       // panning/scrolling of flowchart via click-and-drag
       this.flowchartContainer.addEventListener('mousedown', event => {
@@ -304,12 +349,12 @@ export default {
     moveToNode(item, forceMovement = false) {
       const itemPosition = item.element.getBBox();
       const destinationCoords = {
-        x: (itemPosition.x + itemPosition.width / 2) * this.zoomScale - (
+        x: (itemPosition.x + itemPosition.width / 2) * this.effectiveScale - (
           this.viewStore.introPanelVisible && this.windowWidth > this.fullWidthIntroPanelThreshold
             ? this.introPanelWidth / 2 - this.horizontalCenterOffset
             : 0
         ),
-        y: (itemPosition.y + itemPosition.height / 2) * this.zoomScale + this.windowHeight * 0.05
+        y: (itemPosition.y + itemPosition.height / 2) * this.effectiveScale + this.windowHeight * 0.05
       };
 
       const currentCoords = {
@@ -550,9 +595,28 @@ export default {
       }
 
       &[data-state=teased]:not(.replaced-out) {
-        opacity: 0.2;
+        // solid silhouette: hide text glyphs (always rendered as a direct <path> child),
+        // keep the background shape and force a solid black fill
+        > path {
+          display: none;
+        }
+
+        // decorated nodes: <g id="Shape_N"> wraps a path/circle/ellipse with a noise filter
+        > [id^="Shape"] {
+          filter: none;
+
+          path, circle, ellipse {
+            fill: #000;
+          }
+        }
+
+        // textbox nodes: bare <rect> background
+        > rect {
+          fill: #000;
+        }
       }
 
+      &[data-state=teased]:not(.replaced-out),
       &[data-state=revealed]:not(.replaced-out),
       &[data-state=next]:not(.replaced-out),
       &[data-state=current]:not(.replaced-out),
@@ -578,6 +642,14 @@ export default {
       &[data-state=next]:not(.replaced-out),
       &.replaced-in {
         opacity: 1;
+      }
+
+      &[data-state=next][stroke]:not(.replaced-out) {
+        stroke: #f5c518;
+      }
+
+      &[data-state=next][fill]:not([fill="none"]):not(.replaced-out) {
+        fill: #f5c518;
       }
     }
   }
