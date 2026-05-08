@@ -1,7 +1,7 @@
 <template>
   <div ref="container" class="flowchart">
     <InlineSvg
-      src="flowchart-2.svg"
+      src="flowchart-3.svg"
       :class="{ ready: flowchartElement }"
       @loaded="flowchartReady($event)"
     />
@@ -284,9 +284,46 @@ export default {
         }
       });
 
+      this.reorderNodesAboveEdges();
       this.addNodeInteractivity();
+      this.injectAutoFrames();
       this.fitInitialZoom();
       this.moveToNode(this.flowchartStore.currentNode);
+    },
+
+    // SVG renders later siblings on top. Move every primary node group to the end
+    // of its parent so nodes draw above edges regardless of Figma's export order.
+    reorderNodesAboveEdges() {
+      const nodes = [...this.flowchartElement.querySelectorAll('[id^=n-]')];
+      const primaryNodes = nodes.filter(node => !isNaN(node.id.slice(-1)));
+      primaryNodes.forEach(node => node.parentNode.appendChild(node));
+    },
+
+    // for nodes without a <rect> bg or a Shape group, inject a transparent <rect>
+    // behind them (used as silhouette in teased and yellow box in current states)
+    // and tag the node as .text-only so the default state can color the text instead
+    injectAutoFrames() {
+      const padding = 64;
+
+      Object.values(this.flowchartStore.flowchartNodes).forEach(node => {
+        const el = node.element;
+        if (el.querySelector(':scope > rect')) return;
+        if (el.querySelector(':scope > g[filter]')) return;
+
+        el.classList.add('text-only');
+
+        const bbox = el.getBBox();
+        if (bbox.width === 0 || bbox.height === 0) return;
+
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', bbox.x - padding);
+        rect.setAttribute('y', bbox.y - padding);
+        rect.setAttribute('width', bbox.width + padding * 2);
+        rect.setAttribute('height', bbox.height + padding * 2);
+        rect.setAttribute('fill', 'transparent');
+        rect.classList.add('auto-frame');
+        el.insertBefore(rect, el.firstChild);
+      });
     },
 
     // pick a starting userZoom such that the current node + its outgoing neighbors
@@ -567,11 +604,12 @@ export default {
           display: none;
         }
 
-        // decorated nodes: <g id="Shape_N"> wraps a path/circle/ellipse with a noise filter
-        > [id^="Shape"] {
+        // decorated nodes: inner <g filter="url(...)"> wraps a gradient-filled shape
+        // (Rectangle 1, Shape_N, Union, Vector etc. — anything with a noise filter)
+        > g[filter] {
           filter: none;
 
-          path, circle, ellipse {
+          rect, path, circle, ellipse {
             fill: #000;
           }
         }
@@ -579,6 +617,8 @@ export default {
         // textbox nodes: bare <rect> background
         > rect {
           fill: #000;
+          rx: 48px;
+          ry: 48px;
         }
       }
 
@@ -588,6 +628,36 @@ export default {
       &[data-state=current]:not(.replaced-out),
       &.replaced-in {
         opacity: 1;
+      }
+
+      // current state: paint the (otherwise-invisible) background rect yellow,
+      // and force text glyphs to black (some are natively #FEC70B → invisible on yellow)
+      &[data-state=current]:not(.replaced-out) {
+        > rect:not([fill^="url"]) {
+          fill: #f5c518;
+          rx: 48px;
+          ry: 48px;
+        }
+        > path {
+          fill: #000;
+        }
+      }
+
+      // default/revealed state — decorated nodes (Shape groups with yellow gradient
+      // fills, e.g. the "How are you feeling…" diamond): flatten to grey, drop noise filter.
+      // Option-text nodes: keep bg invisible, just recolor the text glyphs to grey.
+      &[data-state=revealed]:not(.replaced-out) {
+        > g[filter] {
+          filter: none;
+
+          rect, path, circle, ellipse {
+            fill: #999891;
+          }
+        }
+
+        > rect:not([fill^="url"]) ~ path {
+          fill: #999891;
+        }
       }
 
       &.pulse {
@@ -600,14 +670,19 @@ export default {
       opacity: 0;
       pointer-events: none;
 
-      &[data-state=teased]:not(.replaced-out) {
-        opacity: 0.2;
-      }
-
+      &[data-state=teased]:not(.replaced-out),
       &[data-state=revealed]:not(.replaced-out),
       &[data-state=next]:not(.replaced-out),
       &.replaced-in {
         opacity: 1;
+      }
+
+      &[data-state=teased][stroke]:not(.replaced-out) {
+        stroke: #000;
+      }
+
+      &[data-state=teased][fill]:not([fill="none"]):not(.replaced-out) {
+        fill: #000;
       }
 
       &[data-state=next][stroke]:not(.replaced-out) {
