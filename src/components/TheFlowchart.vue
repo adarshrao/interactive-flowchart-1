@@ -26,10 +26,6 @@ export default {
 
   emits: [
     'setCurrentNodeId',
-    'jumpNarrationToNode',
-    'startPlayback',
-    'startExplorationDuringPlayback',
-    'stopExplorationDuringPlayback',
     'toggleIntroPanel'
   ],
 
@@ -135,11 +131,8 @@ export default {
       // dispatch resize event to initially set scaled flowchart width and height
       window.dispatchEvent(new Event('resize'));
 
-      // stop playback and hide chapter list / intro panel upon touch panning
+      // hide intro panel upon touch panning
       this.flowchartContainer.addEventListener('touchmove', () => {
-        if (this.flowchartStore.playbackActive) {
-          this.$emit('startExplorationDuringPlayback');
-        }
         this.$emit('toggleIntroPanel', true);
       });
 
@@ -147,9 +140,6 @@ export default {
       this.flowchartContainer.addEventListener('wheel', event => {
         event.preventDefault();
 
-        if (this.flowchartStore.playbackActive) {
-          this.$emit('startExplorationDuringPlayback');
-        }
         this.$emit('toggleIntroPanel', true);
 
         const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
@@ -180,10 +170,6 @@ export default {
       this.flowchartContainer.addEventListener('mousedown', event => {
         // only start panning if drag was not initiated above visible node
         if (!event.target.closest('[id^=n-].teased, [id^=n-].revealed, [id^=n-].next, [id^=n-].current')) {
-          if (this.flowchartStore.playbackActive) {
-            this.$emit('startExplorationDuringPlayback');
-          }
-
           this.flowchartContainer.classList.add('panning');
 
           this.panCoordinates = {
@@ -255,9 +241,15 @@ export default {
       primaryEdges.forEach(edgeElement => {
         console.log('processing edge: ' + edgeElement.id);
         const edgeNodes = edgeElement.id.split('-');
-        const edgeFrom = 'n-' + edgeNodes[1];
-        const edgeTo = 'n-' + edgeNodes[2];
+        // strip any "_<suffix>" (e.g. "_2" on parallel edges like e-031-032_2) so node lookup still works
+        const edgeFrom = 'n-' + edgeNodes[1].split('_')[0];
+        const edgeTo = 'n-' + edgeNodes[2].split('_')[0];
         const bidirectionalEdge = edgeNodes.length >= 4 && isNaN(edgeNodes[3]);
+
+        if (!this.flowchartStore.flowchartNodes[edgeFrom] || !this.flowchartStore.flowchartNodes[edgeTo]) {
+          console.warn('skipping edge with missing node reference: ' + edgeElement.id);
+          return;
+        }
 
         const alternates = {};
         const alternatesArray = alternateEdges.filter(alternateEdge => alternateEdge.id.startsWith(edgeElement.id));
@@ -293,7 +285,36 @@ export default {
       });
 
       this.addNodeInteractivity();
+      this.fitInitialZoom();
       this.moveToNode(this.flowchartStore.currentNode);
+    },
+
+    // pick a starting userZoom such that the current node + its outgoing neighbors
+    // (the only items revealed on first load) fit in the viewport with some margin
+    fitInitialZoom() {
+      const current = this.flowchartStore.currentNode;
+      if (!current) return;
+
+      const cluster = [current.element, ...current.outgoing.map(o => o.node.element)];
+      const bboxes = cluster.map(el => el.getBBox());
+
+      const minX = Math.min(...bboxes.map(b => b.x));
+      const minY = Math.min(...bboxes.map(b => b.y));
+      const maxX = Math.max(...bboxes.map(b => b.x + b.width));
+      const maxY = Math.max(...bboxes.map(b => b.y + b.height));
+
+      const clusterWidth = maxX - minX;
+      const clusterHeight = maxY - minY;
+      if (clusterWidth <= 0 || clusterHeight <= 0) return;
+
+      // require the cluster to occupy at most ~45% of each viewport axis
+      const targetFraction = 0.45;
+      const fitX = (this.windowWidth * targetFraction) / (clusterWidth * this.zoomScale);
+      const fitY = (this.windowHeight * targetFraction) / (clusterHeight * this.zoomScale);
+
+      const fitZoom = Math.min(fitX, fitY);
+      this.userZoom = Math.min(Math.max(this.userZoomMin, fitZoom), this.userZoomMax);
+      this.applyScale();
     },
 
     // attach click listeners to node elements
@@ -305,19 +326,8 @@ export default {
           const nodeClickable = ['revealed', 'next', 'current'].includes(this.getAttribute('data-state'));
 
           if (nodeClickable) {
-            // stop exploration during playback if active
-            if (vueInstance.flowchartStore.playbackActive && vueInstance.flowchartStore.exploringDuringPlayback) {
-              vueInstance.$emit('stopExplorationDuringPlayback');
-            }
-
-            // if clicked node is different from current node, either jump narration to that node (if playback is active)
-            // or set node ID without affecting narration; otherwise re-center current node
             if (nodeId !== vueInstance.flowchartStore.currentNodeId) {
-              if (vueInstance.flowchartStore.playbackActive) {
-                vueInstance.$emit('jumpNarrationToNode', nodeId);
-              } else {
-                vueInstance.$emit('setCurrentNodeId', nodeId);
-              }
+              vueInstance.$emit('setCurrentNodeId', nodeId);
             } else {
               vueInstance.moveToNode(vueInstance.flowchartStore.currentNode, true);
             }
@@ -366,8 +376,7 @@ export default {
         Math.pow(currentCoords.x - destinationCoords.x, 2) + Math.pow(currentCoords.y - destinationCoords.y, 2)
       );
 
-      // omit movement if playback is active and distance from viewport center to destination node falls below threshold
-      if (forceMovement || !this.flowchartStore.playbackActive || travelDistance > this.travelThreshold) {
+      if (forceMovement || travelDistance > this.travelThreshold) {
         const duration = Math.min(
           Math.max(
             travelDistance * this.transitionParameters.distanceFactor,
@@ -471,56 +480,13 @@ export default {
       if (this.flowchartStore.teasedItems.indexOf(node.id) === -1) {
         this.flowchartStore.teasedItems.push(node.id);
       }
-    },
-
-    // add timestamp/event index to listenedTimestampIndexes array
-    markTimestampAsListened(index) {
-      if (this.flowchartStore.listenedTimestampIndexes.indexOf(index) === -1) {
-        this.flowchartStore.listenedTimestampIndexes.push(index);
-      }
     }
   },
 
   watch: {
-    // when a new node ID is set, move to the updated (now current) node ID,
-    // unless exploration during playback is active, in which case only refresh appearance
     'flowchartStore.currentNodeId'() {
-      if (!this.flowchartStore.exploringDuringPlayback) {
-        this.moveToNode(this.flowchartStore.currentNode);
-      } else {
-        this.updateAppearance();
-      }
-    },
-
-    // update current node ID upon change of narration node ID (which changes based on playback position)
-    'flowchartStore.currentNarrationNodeId'() {
-      this.$emit('setCurrentNodeId', this.flowchartStore.currentNarrationNodeId);
-
-      // start playback if not active already (happens when jumpNarrationToNode is triggered)
-      if (!this.flowchartStore.playbackActive) {
-        this.$emit('startPlayback', true);
-      }
-    },
-
-    // when the narration index changes, mark that timestamp/event as listened
-    'flowchartStore.currentNarrationNodeIndex'() {
-      this.markTimestampAsListened(this.flowchartStore.currentNarrationNodeIndex);
-    },
-
-    // when playback is started, move to current node (if current node
-    // does not change, no movement is otherwise initiated)
-    'flowchartStore.playbackActive'() {
-      if (this.flowchartStore.playbackActive) {
-        this.moveToNode(this.flowchartStore.currentNode);
-      }
-    },
-
-    // move back to current node if exploration during playback ends
-    'flowchartStore.exploringDuringPlayback'() {
-      if (!this.flowchartStore.exploringDuringPlayback && this.flowchartStore.playbackActive) {
-        this.moveToNode(this.flowchartStore.currentNode, true);
-      }
-    },
+      this.moveToNode(this.flowchartStore.currentNode);
+    }
   },
 
   created() {

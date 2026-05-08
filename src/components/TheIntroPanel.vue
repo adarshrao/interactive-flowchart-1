@@ -45,7 +45,6 @@ export default {
   },
 
   emits: [
-    'togglePlayback',
     'toggleIntroPanel'
   ],
 
