@@ -9,20 +9,23 @@
       @loaded="flowchartReady($event)"
     />
   </div>
-  <div v-if="flowchartElement" class="zoom-controls" :class="{ 'panel-visible': viewStore.introPanelVisible }">
-    <button class="zoom-btn" title="Zoom out" @click="zoomOut">−</button>
-    <input
-      class="zoom-slider"
-      type="range"
-      :min="zoomSliderMin"
-      :max="zoomSliderMax"
-      step="1"
-      :value="currentZoomPercent()"
-      @input="setZoomPercent(parseInt($event.target.value))"
-    />
-    <span class="zoom-readout">{{ currentZoomPercent() }}%</span>
-    <button class="zoom-btn" title="Zoom in" @click="zoomIn">+</button>
-    <button class="zoom-btn fit" title="Reset to 100%" @click="resetZoom">⤢</button>
+  <div v-if="flowchartElement" class="bottom-controls" :class="{ 'panel-visible': viewStore.introPanelVisible }">
+    <div class="zoom-controls">
+      <button class="zoom-btn" title="Zoom out" @click="zoomOut">−</button>
+      <input
+        class="zoom-slider"
+        type="range"
+        :min="zoomSliderMin"
+        :max="zoomSliderMax"
+        step="1"
+        :value="currentZoomPercent()"
+        @input="setZoomPercent(parseInt($event.target.value))"
+      />
+      <span class="zoom-readout">{{ currentZoomPercent() }}%</span>
+      <button class="zoom-btn" title="Zoom in" @click="zoomIn">+</button>
+      <button class="zoom-btn fit" title="Reset to 100%" @click="resetZoom">⤢</button>
+    </div>
+    <button class="reveal-all-btn" title="Reveal everything so you can explore at your own pace" @click="revealAll">Reveal all</button>
   </div>
 </template>
 
@@ -144,7 +147,7 @@ export default {
 
       // count of how many times teased nodes have been attempted to be clicked
       teasedClickAttempts: 0,
-      
+
       // fixed pixel values
       introPanelWidth: 416,
       fullWidthIntroPanelThreshold: 600,
@@ -383,20 +386,28 @@ export default {
       nodes.forEach(node => node.parentNode.appendChild(node));
     },
 
-    // Make the flower's default (no-state) primaries always visible as a flat gray
-    // base layer with no text. Tag each flower default group with .flower-default
-    // (CSS makes it visible when not .replaced-out) and hide direct child text-glyph
-    // paths so only the petal/cell silhouette renders. State alternates (teased,
-    // current, next) replace the primary as usual when a section is active.
+    // Tag the flower default primaries so CSS can manage their appearance:
+    //   - never-visited petal → painted #523535, text hidden
+    //   - visited petal (was current at some point) → default Figma view (gray + text)
+    //   - current petal → existing _current alternate replaces the primary
+    // We add classes for the petal silhouette path (Union/Vector/Shape) and the text
+    // glyph paths so CSS can target them independently.
     prepareFlowerBaseLayer() {
       this.flowerNodeIds.forEach(id => {
         const el = this.flowchartElement.querySelector(`g[id="${id}"]`);
         if (!el) return;
         el.classList.add('flower-default');
-        el.querySelectorAll(':scope > path').forEach(path => {
-          const pid = path.id || '';
-          if (!/^(Union|Vector|Shape)/.test(pid)) {
-            path.style.display = 'none';
+        // Classify by fill color rather than id pattern: Figma sometimes nests the
+        // petal-silhouette path inside a child <g> (e.g. n-044, n-057) where ids
+        // get stripped, so a depth-1 selector or id regex misses them.
+        // - fill="#a6a59b" → petal/cell silhouette
+        // - fill="#fff"    → text glyph
+        el.querySelectorAll('path, circle, ellipse').forEach(shape => {
+          const fill = (shape.getAttribute('fill') || '').toLowerCase();
+          if (fill === '#a6a59b') {
+            shape.classList.add('flower-shape');
+          } else if (fill === '#fff' || fill === '#ffffff') {
+            shape.classList.add('flower-text-glyph');
           }
         });
       });
@@ -612,6 +623,18 @@ export default {
       this.setZoomPercent(prev);
     },
     // "fit" button: re-fit current node's cluster into the viewport.
+    // mark every node + edge as revealed so the user can navigate freely without
+    // having to traverse the chain step-by-step. updateAppearance reads the
+    // revealedItems list and applies data-state="revealed" to each.
+    revealAll() {
+      Object.values(this.flowchartStore.flowchartNodes).forEach(node => {
+        this.markItemAsRevealed(node.element);
+        node.outgoing.forEach(item => this.markItemAsRevealed(item.edge));
+      });
+      this.updateAppearance();
+      this.flowchartStore.saveToLocalStorage?.();
+    },
+
     resetZoom() {
       this.userZoom = this.fitZoomToCluster(this.flowchartStore.currentNode);
       this.applyScale();
@@ -624,7 +647,10 @@ export default {
 
       Object.entries(this.flowchartStore.flowchartNodes).forEach(([nodeId, node]) => {
         node.element.addEventListener('click', function() {
-          const nodeClickable = ['revealed', 'next', 'current'].includes(this.getAttribute('data-state'));
+          // flower petals are always clickable regardless of data-state — the design
+          // lets you jump to any petal in any order rather than walking the chain.
+          const isFlower = vueInstance.flowerNodeIds.includes(nodeId);
+          const nodeClickable = isFlower || ['revealed', 'next', 'current'].includes(this.getAttribute('data-state'));
 
           // any node interaction (click on a clickable node, or a teased one) closes the
           // intro panel so the user has more room to explore.
@@ -929,12 +955,25 @@ export default {
         item.node.element.setAttribute('data-state', 'next');
       });
 
-      this.flowchartStore.currentNode.element.setAttribute('data-state', 'current');
-      this.markItemAsRevealed(this.flowchartStore.currentNode.element);
+      const currentEl = this.flowchartStore.currentNode.element;
+      currentEl.setAttribute('data-state', 'current');
+      this.markItemAsRevealed(currentEl);
+      // flower petals: once a petal has been current at any point, mark it visited so
+      // it permanently switches from the unvisited #523535 look to the default
+      // gray-plus-text view (per design — clicking is what reveals).
+      if (this.flowerNodeIds.includes(currentEl.id)) {
+        currentEl.classList.add('flower-visited');
+      }
 
-      // replace primary elements with alternate state variants if those exist
+      // replace primary elements with alternate state variants if those exist.
+      // Flower petals are an exception: only the _current alternate is allowed to
+      // replace their primary. teased/next/revealed states keep the primary showing
+      // (which the CSS paints #523535 when unvisited, default gray+text once
+      // visited) so there's no "next preview" color anywhere on the flower.
       ['teased', 'revealed', 'next', 'current'].forEach(state => {
         this.flowchartElement.querySelectorAll('[data-state=' + state +']').forEach(element => {
+          if (this.flowerNodeIds.includes(element.id) && state !== 'current') return;
+
           const replacementElement = this.findReplacementElement(element, state);
 
           if (replacementElement) {
@@ -1083,11 +1122,11 @@ export default {
         pointer-events: all;
       }
 
-      &[data-state=teased] {
+      &[data-state=teased]:not(.flower-default) {
         cursor: not-allowed;
       }
 
-      &[data-state=teased]:not(.replaced-out) {
+      &[data-state=teased]:not(.replaced-out):not(.flower-default) {
         // solid silhouette: hide text glyphs (always rendered as a direct <path> child),
         // keep the background shape and force a solid black fill
         > path {
@@ -1117,10 +1156,29 @@ export default {
         opacity: 1;
       }
 
-      // flower base layer: petals/cells always visible as a gray silhouette unless
-      // a colored state alternate has replaced the primary.
+      // flower base layer: petals/cells always visible. Until a petal has been
+      // visited, it's painted in #523535 with no text glyphs. Once visited (became
+      // current at some point), the default Figma view shows (gray + white text).
       &.flower-default:not(.replaced-out) {
         opacity: 1;
+        cursor: pointer;
+      }
+
+      &.flower-default:not(.flower-visited):not(.replaced-out) {
+        .flower-text-glyph {
+          display: none;
+        }
+
+        .flower-shape {
+          fill: #523535;
+        }
+      }
+
+      // n-057 (Values center) ships from Figma without a stroke. Other petals have
+      // a stroke="#fff" stroke-width="10" attribute already; match that, just thinner.
+      &[id="n-057"] .flower-shape {
+        stroke: #fff;
+        stroke-width: 10;
       }
 
       &.pulse {
@@ -1164,12 +1222,23 @@ export default {
   }
 }
 
-.zoom-controls {
+.bottom-controls {
   position: fixed;
   z-index: 50;
   bottom: 16px;
   left: 50%;
   transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: left 0.25s var(--transition-timing);
+
+  &.panel-visible {
+    left: calc(50% + var(--panel-width) / 2);
+  }
+}
+
+.zoom-controls {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -1182,11 +1251,6 @@ export default {
   font-family: inherit;
   font-size: 13px;
   color: rgb(var(--text-color));
-  transition: left 0.25s var(--transition-timing);
-
-  &.panel-visible {
-    left: calc(50% + var(--panel-width) / 2);
-  }
 
   .zoom-btn {
     width: 32px;
@@ -1251,8 +1315,31 @@ export default {
   }
 }
 
+.reveal-all-btn {
+  height: 40px;
+  padding: 0 16px;
+  appearance: none;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+  color: rgb(var(--text-color));
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease;
+
+  &:hover {
+    background: rgba(255, 255, 255, 1);
+  }
+}
+
 @media (max-width: 600px) {
-  .zoom-controls.panel-visible {
+  .bottom-controls.panel-visible {
     left: 50%;
   }
 }
