@@ -17,6 +17,17 @@ coverage
 /cypress/videos/
 /cypress/screenshots/
 
+# Unused flowchart SVGs (active: flowchart-6-renamed.svg)
+public/extra nodes.svg
+public/flowchart-3-current.svg
+public/flowchart-3-next.svg
+public/flowchart-4-renamed.svg
+public/flowchart-4.svg
+public/flowchart-5-renamed.svg
+public/flowchart-5.svg
+public/flowchart-6.svg
+public/flowchart-6-renamed.svg.bak
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
