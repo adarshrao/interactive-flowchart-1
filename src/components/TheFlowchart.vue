@@ -1,16 +1,34 @@
 <template>
   <div ref="container" class="flowchart">
+    <div class="loader" :class="{ hidden: flowchartElement, 'panel-visible': viewStore.introPanelVisible }">
+      <div class="spinner" />
+    </div>
     <InlineSvg
-      src="flowchart-2.svg"
+      src="flowchart-6-renamed.svg"
       :class="{ ready: flowchartElement }"
       @loaded="flowchartReady($event)"
     />
+  </div>
+  <div v-if="flowchartElement" class="zoom-controls" :class="{ 'panel-visible': viewStore.introPanelVisible }">
+    <button class="zoom-btn" title="Zoom out" @click="zoomOut">−</button>
+    <input
+      class="zoom-slider"
+      type="range"
+      :min="zoomSliderMin"
+      :max="zoomSliderMax"
+      step="1"
+      :value="currentZoomPercent()"
+      @input="setZoomPercent(parseInt($event.target.value))"
+    />
+    <span class="zoom-readout">{{ currentZoomPercent() }}%</span>
+    <button class="zoom-btn" title="Zoom in" @click="zoomIn">+</button>
+    <button class="zoom-btn fit" title="Reset to 100%" @click="resetZoom">⤢</button>
   </div>
 </template>
 
 <script>
 import { mapStores } from 'pinia';
-import { scaleLinear, easeExpOut } from 'd3';
+import { scaleLinear, easeCubicInOut } from 'd3';
 
 import InlineSvg from 'vue-inline-svg';
 
@@ -26,10 +44,6 @@ export default {
 
   emits: [
     'setCurrentNodeId',
-    'jumpNarrationToNode',
-    'startPlayback',
-    'startExplorationDuringPlayback',
-    'stopExplorationDuringPlayback',
     'toggleIntroPanel'
   ],
 
@@ -59,10 +73,65 @@ export default {
       // coordinates stored during panning/dragging
       panCoordinates: undefined,
 
-      // user-controlled zoom multiplier (scroll-to-zoom)
+      // user-controlled zoom multiplier. percentages in the UI are absolute:
+      // currentZoomPercent = userZoom × 100. so 100% = userZoom 1.0, always.
       userZoom: 1,
       userZoomMin: 0.2,
       userZoomMax: 8,
+
+      // n-042..n-057 form the "flower" cluster (5 petals + 10 inner segments + Values).
+      // Entering it from outside snaps to 64% and centers on the cluster; navigating
+      // between flower nodes stays put. Manual zoom changes during the visit override.
+      // n-042..n-057 form the petal cluster (5 petals + 10 inner segments + Values).
+      flowerNodeIds: [
+        'n-042', 'n-043', 'n-044', 'n-045', 'n-046',
+        'n-047', 'n-048', 'n-049', 'n-050', 'n-051',
+        'n-052', 'n-053', 'n-054', 'n-055', 'n-056', 'n-057'
+      ],
+      inFlowerMode: false,
+      flowerZoomOverridden: false,
+      // userZoom snapshot taken right before entering the flower, restored when leaving
+      // so the user returns to the same exploration zoom they had before the petal detour.
+      preFlowerZoom: null,
+      // nodes that snap zoom to fit-the-node-and-its-outgoing on click. used when
+      // the next node is far enough away that staying at the same zoom level would
+      // crop the destination out of view.
+      fitClusterNodeIds: [
+        'n-059', 'n-069', 'n-079', 'n-089', 'n-099', 'n-109',
+        'n-119', 'n-129', 'n-139', 'n-149', 'n-159', 'n-169'
+      ],
+      // fixed userZoom used when clicking any case study so all case studies present
+      // at the same zoom level (otherwise per-cluster fitting yields different zooms
+      // for each because outgoing bboxes vary).
+      caseStudyZoom: 2.26,
+      // per-node viewport offset overrides: shift the destination off-center.
+      // xFactor positive = node appears toward the left of viewport (more right-side
+      // visible). yFactor negative = node appears toward the bottom (more up-side visible).
+      nodeViewportOffsets: {
+        // n-058 ("I wonder what these look like in the real world"): small bias so
+        // the destination side (n-035, upper-right) gets a bit more space without
+        // pushing n-058 itself off-screen.
+        'n-058': { xFactor: 0.08, yFactor: -0.08 }
+      },
+      // nodes that snap to flower zoom (zoomed-out enough to show the destination across
+      // a long curved arrow) and center on the cluster bbox of the node + its outgoing.
+      // n-058 → n-035 spans a long diagonal; default zoom is too tight to show both.
+      flowerZoomNodeIds: ['n-058'],
+      // "passthrough" label nodes: clicking one immediately advances to its outgoing
+      // target rather than dwelling on the label itself. Used for the
+      // "Keep exploring case studies" labels at each case-study chain ending — they
+      // exist as a visual hint but the user shouldn't have to click twice to land
+      // on "Looking at lived examples" (n-035).
+      passthroughNodeIds: [
+        'n-200', 'n-201', 'n-202', 'n-203', 'n-204', 'n-205',
+        'n-206', 'n-207', 'n-208', 'n-209', 'n-210', 'n-211'
+      ],
+      // entry nodes that snap to a fit-zoom over a cluster of children.
+      // `fraction` is the share of viewport the cluster bbox should occupy.
+      clusterEntryNodes: {
+        'n-039': { ids: ['n-059', 'n-069', 'n-079', 'n-089', 'n-099', 'n-109'], fraction: 0.95 },
+        'n-040': { ids: ['n-119', 'n-129', 'n-139', 'n-149', 'n-159', 'n-169'], fraction: 0.95 }
+      },
 
       // parameters for movement/transitions to nodes
       transitionParameters: {
@@ -102,6 +171,13 @@ export default {
         this.shortestWindowSideLength * this.transitionParameters.screenSizeFactor,
         this.transitionParameters.maxTravelThreshold
       );
+    },
+    // slider range in absolute percentage units (100% = userZoom 1.0).
+    zoomSliderMin() {
+      return Math.ceil(this.userZoomMin * 100 / 5) * 5;
+    },
+    zoomSliderMax() {
+      return Math.floor(this.userZoomMax * 100 / 5) * 5;
     }
   },
 
@@ -135,55 +211,36 @@ export default {
       // dispatch resize event to initially set scaled flowchart width and height
       window.dispatchEvent(new Event('resize'));
 
-      // stop playback and hide chapter list / intro panel upon touch panning
+      // hide intro panel upon touch panning
       this.flowchartContainer.addEventListener('touchmove', () => {
-        if (this.flowchartStore.playbackActive) {
-          this.$emit('startExplorationDuringPlayback');
-        }
         this.$emit('toggleIntroPanel', true);
       });
 
-      // wheel = zoom around cursor (replaces native scroll-pan); pan still works via click-drag
+      // wheel: scroll = pan (native), Ctrl/⌘+wheel or trackpad pinch (ctrlKey=true) = zoom around cursor
       this.flowchartContainer.addEventListener('wheel', event => {
-        event.preventDefault();
-
-        if (this.flowchartStore.playbackActive) {
-          this.$emit('startExplorationDuringPlayback');
+        if (!event.ctrlKey && !event.metaKey) {
+          // let the browser scroll the container natively → panning
+          this.$emit('toggleIntroPanel', true);
+          return;
         }
+
+        event.preventDefault();
         this.$emit('toggleIntroPanel', true);
 
         const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
-        const oldZoom = this.userZoom;
-        const newZoom = Math.min(Math.max(this.userZoomMin, oldZoom * factor), this.userZoomMax);
-        if (newZoom === oldZoom) return;
-
-        // anchor zoom on cursor: keep the SVG point under the cursor fixed
         const containerRect = this.flowchartContainer.getBoundingClientRect();
         const cursorX = event.clientX - containerRect.left;
         const cursorY = event.clientY - containerRect.top;
-        const ratio = newZoom / oldZoom;
-
-        this.userZoom = newZoom;
-        this.applyScale();
-
-        // SVG sits inside scroll-content with 50vw/50vh CSS margin; that margin is fixed,
-        // so a point at scrollLeft+cursorX in scroll-content corresponds to (… - 50vw) in SVG space
-        const marginX = 0.5 * this.windowWidth;
-        const marginY = 0.5 * this.windowHeight;
-        const svgX = this.flowchartContainer.scrollLeft + cursorX - marginX;
-        const svgY = this.flowchartContainer.scrollTop + cursorY - marginY;
-        this.flowchartContainer.scrollLeft = svgX * ratio + marginX - cursorX;
-        this.flowchartContainer.scrollTop = svgY * ratio + marginY - cursorY;
+        this.zoomBy(factor, cursorX, cursorY);
       }, { passive: false });
 
       // panning/scrolling of flowchart via click-and-drag
       this.flowchartContainer.addEventListener('mousedown', event => {
+        // any flowchart interaction closes the intro panel
+        this.$emit('toggleIntroPanel', true);
+
         // only start panning if drag was not initiated above visible node
         if (!event.target.closest('[id^=n-].teased, [id^=n-].revealed, [id^=n-].next, [id^=n-].current')) {
-          if (this.flowchartStore.playbackActive) {
-            this.$emit('startExplorationDuringPlayback');
-          }
-
           this.flowchartContainer.classList.add('panning');
 
           this.panCoordinates = {
@@ -231,14 +288,8 @@ export default {
 
       primaryNodes.forEach(nodeElement => {
         const nodeId = nodeElement.id;
-        console.log('processing node: ' + nodeId);
 
-        const alternates = {};
-        const alternatesArray = alternateNodes.filter(alternateNode => alternateNode.id.startsWith(nodeId));
-
-        alternatesArray.forEach(alternateNode => {
-          alternates[alternateNode.id.split('_')[1]] = alternateNode;
-        });
+        const alternates = this.collectAlternates(nodeId, alternateNodes);
         
         this.flowchartStore.flowchartNodes[nodeId] = {
           element: nodeElement,
@@ -253,18 +304,18 @@ export default {
       const alternateEdges = edges.filter(edge => !primaryEdges.includes(edge));
 
       primaryEdges.forEach(edgeElement => {
-        console.log('processing edge: ' + edgeElement.id);
         const edgeNodes = edgeElement.id.split('-');
-        const edgeFrom = 'n-' + edgeNodes[1];
-        const edgeTo = 'n-' + edgeNodes[2];
+        // strip any "_<suffix>" (e.g. "_2" on parallel edges like e-031-032_2) so node lookup still works
+        const edgeFrom = 'n-' + edgeNodes[1].split('_')[0];
+        const edgeTo = 'n-' + edgeNodes[2].split('_')[0];
         const bidirectionalEdge = edgeNodes.length >= 4 && isNaN(edgeNodes[3]);
 
-        const alternates = {};
-        const alternatesArray = alternateEdges.filter(alternateEdge => alternateEdge.id.startsWith(edgeElement.id));
+        if (!this.flowchartStore.flowchartNodes[edgeFrom] || !this.flowchartStore.flowchartNodes[edgeTo]) {
+          console.warn('skipping edge with missing node reference: ' + edgeElement.id);
+          return;
+        }
 
-        alternatesArray.forEach(alternateEdge => {
-          alternates[alternateEdge.id.split('_')[1]] = alternateEdge;
-        });
+        const alternates = this.collectAlternates(edgeElement.id, alternateEdges);
 
         this.flowchartStore.flowchartNodes[edgeFrom].outgoing.push({
           edge: edgeElement,
@@ -292,8 +343,279 @@ export default {
         }
       });
 
+      this.removeFrameBackgrounds();
+      this.reorderStateFrames();
+      this.reorderNodesAboveEdges();
+      this.reorderFlowerLayers();
+      this.prepareFlowerBaseLayer();
       this.addNodeInteractivity();
-      this.moveToNode(this.flowchartStore.currentNode);
+      this.fitInitialZoom();
+      this.moveToNode(this.flowchartStore.currentNode, false, true);
+    },
+
+    // Each Figma state frame exports a full-canvas <rect> as its background. With
+    // four frames stacked, the topmost frame's bg covers everything underneath, hiding
+    // the alternates that should be revealed via replaced-in. Strip them.
+    removeFrameBackgrounds() {
+      ['teased', 'current', 'next', 'default'].forEach(state => {
+        const frame = this.flowchartElement.querySelector(`g[id="${state}"]`);
+        if (!frame) return;
+        const firstRect = frame.querySelector(':scope > rect');
+        if (firstRect && !firstRect.id) firstRect.remove();
+      });
+    },
+
+    // Reorder the four state frames so later siblings (rendered on top) follow this
+    // priority bottom→top: default, teased, current, next. Next on top so a "next"
+    // alternate that overlaps a "current" alternate stays visible.
+    reorderStateFrames() {
+      ['default', 'teased', 'current', 'next'].forEach(state => {
+        const frame = this.flowchartElement.querySelector(`g[id="${state}"]`);
+        if (frame && frame.parentNode) frame.parentNode.appendChild(frame);
+      });
+    },
+
+    // SVG renders later siblings on top. Move every node (default + alternates) to
+    // the end of its parent frame so nodes draw above edges, regardless of Figma's
+    // export order.
+    reorderNodesAboveEdges() {
+      const nodes = [...this.flowchartElement.querySelectorAll('[id^=n-]')];
+      nodes.forEach(node => node.parentNode.appendChild(node));
+    },
+
+    // Make the flower's default (no-state) primaries always visible as a flat gray
+    // base layer with no text. Tag each flower default group with .flower-default
+    // (CSS makes it visible when not .replaced-out) and hide direct child text-glyph
+    // paths so only the petal/cell silhouette renders. State alternates (teased,
+    // current, next) replace the primary as usual when a section is active.
+    prepareFlowerBaseLayer() {
+      this.flowerNodeIds.forEach(id => {
+        const el = this.flowchartElement.querySelector(`g[id="${id}"]`);
+        if (!el) return;
+        el.classList.add('flower-default');
+        el.querySelectorAll(':scope > path').forEach(path => {
+          const pid = path.id || '';
+          if (!/^(Union|Vector|Shape)/.test(pid)) {
+            path.style.display = 'none';
+          }
+        });
+      });
+    },
+
+    // The 5 outer petals overlap each other and the 11 inner cells fill those overlap
+    // regions. Without intervention, an outer petal's state alternate will paint over
+    // the inner cells in those regions, hiding labels. Re-append all outer petals
+    // first then all inner cells last (across every state) to the SVG root so the
+    // inner cells always draw on top of the outer petals regardless of state.
+    // Edges between flower nodes go on top of everything so the arrows between petals
+    // remain visible.
+    reorderFlowerLayers() {
+      const outerIds = ['n-042', 'n-043', 'n-044', 'n-045', 'n-046'];
+      const innerIds = ['n-047', 'n-048', 'n-049', 'n-050', 'n-051',
+                        'n-052', 'n-053', 'n-054', 'n-055', 'n-056', 'n-057'];
+      const stateSuffixes = ['', '_teased', '_current', '_next'];
+      const flowerNumbers = new Set(
+        [...outerIds, ...innerIds].map(id => id.slice(2))
+      );
+
+      const moveAll = ids => {
+        ids.forEach(id => {
+          stateSuffixes.forEach(suffix => {
+            const el = this.flowchartElement.querySelector(`[id="${id}${suffix}"]`);
+            if (el) this.flowchartElement.appendChild(el);
+          });
+        });
+      };
+
+      moveAll(outerIds);
+      moveAll(innerIds);
+
+      // edges connecting two flower nodes: id pattern e-NNN-NNN(_suffix)? where both
+      // numeric segments are flower node numbers. lift them above the petals.
+      const edges = [...this.flowchartElement.querySelectorAll('[id^=e-]')];
+      edges.forEach(edge => {
+        const parts = edge.id.split('-');
+        if (parts.length < 3) return;
+        const fromNum = parts[1].split('_')[0];
+        const toNum = parts[2].split('_')[0];
+        if (flowerNumbers.has(fromNum) && flowerNumbers.has(toNum)) {
+          this.flowchartElement.appendChild(edge);
+        }
+      });
+    },
+
+    // For a primary id, find its state alternates among `alternates`. We look for
+    // siblings whose ids match `<primaryId>_<state>` exactly — that prefix-plus-known-state
+    // check correctly excludes things like `e-031-032_2_teased` from being mis-attached
+    // to `e-031-032`.
+    collectAlternates(primaryId, alternates) {
+      const known = ['teased', 'revealed', 'next', 'current'];
+      const result = {};
+      alternates.forEach(alt => {
+        for (const state of known) {
+          if (alt.id === `${primaryId}_${state}`) {
+            result[state] = alt;
+            break;
+          }
+        }
+      });
+      return result;
+    },
+
+    // returns the userZoom that fits the union bbox of `elements` within `fraction`
+    // of each viewport axis, clamped to userZoomMin/Max. shared geometry helper used
+    // by every snap target so they all behave consistently.
+    zoomToFit(elements, fraction = 0.45) {
+      const els = elements.filter(Boolean);
+      if (!els.length) return this.userZoom;
+      const bboxes = els.map(el => el.getBBox());
+      const minX = Math.min(...bboxes.map(b => b.x));
+      const minY = Math.min(...bboxes.map(b => b.y));
+      const maxX = Math.max(...bboxes.map(b => b.x + b.width));
+      const maxY = Math.max(...bboxes.map(b => b.y + b.height));
+      const w = maxX - minX;
+      const h = maxY - minY;
+      if (w <= 0 || h <= 0) return this.userZoom;
+      const fitX = (this.windowWidth * fraction) / (w * this.zoomScale);
+      const fitY = (this.windowHeight * fraction) / (h * this.zoomScale);
+      const fit = Math.min(fitX, fitY);
+      return Math.min(Math.max(this.userZoomMin, fit), this.userZoomMax);
+    },
+
+    // userZoom that fits node + outgoing neighbors into ~45% of the viewport.
+    fitZoomToCluster(node) {
+      if (!node) return this.userZoom;
+      return this.zoomToFit([node.element, ...node.outgoing.map(o => o.node.element)], 0.45);
+    },
+
+    fitInitialZoom() {
+      const z = this.fitZoomToCluster(this.flowchartStore.currentNode);
+      this.userZoom = z;
+      this.applyScale();
+    },
+
+    // userZoom that fits the entire flower into ~85% of the viewport.
+    fitZoomForFlower(fraction = 0.85) {
+      const els = this.flowerNodeIds.map(id => this.flowchartStore.flowchartNodes[id]?.element);
+      return this.zoomToFit(els, fraction);
+    },
+
+    // change userZoom by `factor`, keeping the SVG point under (anchorX, anchorY) — a
+    // pixel offset within the container — fixed. anchor defaults to viewport center.
+    zoomBy(factor, anchorX, anchorY) {
+      const oldZoom = this.userZoom;
+      const newZoom = Math.min(Math.max(this.userZoomMin, oldZoom * factor), this.userZoomMax);
+      if (newZoom === oldZoom) return;
+
+      // mark as user override so flower auto-snap stops re-applying during this visit
+      if (this.inFlowerMode) {
+        this.flowerZoomOverridden = true;
+      }
+
+      const rect = this.flowchartContainer.getBoundingClientRect();
+      const ax = anchorX ?? rect.width / 2;
+      const ay = anchorY ?? rect.height / 2;
+      const ratio = newZoom / oldZoom;
+
+      this.userZoom = newZoom;
+      this.applyScale();
+
+      const marginX = 0.5 * this.windowWidth;
+      const marginY = 0.5 * this.windowHeight;
+      const svgX = this.flowchartContainer.scrollLeft + ax - marginX;
+      const svgY = this.flowchartContainer.scrollTop + ay - marginY;
+      this.flowchartContainer.scrollLeft = svgX * ratio + marginX - ax;
+      this.flowchartContainer.scrollTop = svgY * ratio + marginY - ay;
+    },
+
+    // returns the bbox center of the given nodes plus viewport offsets.
+    computeClusterCenter(nodeIds) {
+      const els = nodeIds
+        .map(id => this.flowchartStore.flowchartNodes[id]?.element)
+        .filter(Boolean);
+      if (!els.length) return null;
+
+      const bboxes = els.map(el => el.getBBox());
+      const minX = Math.min(...bboxes.map(b => b.x));
+      const minY = Math.min(...bboxes.map(b => b.y));
+      const maxX = Math.max(...bboxes.map(b => b.x + b.width));
+      const maxY = Math.max(...bboxes.map(b => b.y + b.height));
+
+      return {
+        x: (minX + maxX) / 2,
+        y: (minY + maxY) / 2,
+        xOffsetPx: -(
+          this.viewStore.introPanelVisible && this.windowWidth > this.fullWidthIntroPanelThreshold
+            ? this.introPanelWidth / 2 - this.horizontalCenterOffset
+            : 0
+        ),
+        yOffsetPx: 0
+      };
+    },
+
+    // returns { x, y, xOffsetPx, yOffsetPx } describing the flower cluster's center
+    // in SVG coordinates and the desired viewport offsets, or null if no flower nodes.
+    computeFlowerCenter() {
+      const els = this.flowerNodeIds
+        .map(id => this.flowchartStore.flowchartNodes[id]?.element)
+        .filter(Boolean);
+      if (!els.length) return null;
+
+      const bboxes = els.map(el => el.getBBox());
+      const minX = Math.min(...bboxes.map(b => b.x));
+      const minY = Math.min(...bboxes.map(b => b.y));
+      const maxX = Math.max(...bboxes.map(b => b.x + b.width));
+      const maxY = Math.max(...bboxes.map(b => b.y + b.height));
+
+      return {
+        x: (minX + maxX) / 2,
+        y: (minY + maxY) / 2,
+        xOffsetPx: -(
+          this.viewStore.introPanelVisible && this.windowWidth > this.fullWidthIntroPanelThreshold
+            ? this.introPanelWidth / 2 - this.horizontalCenterOffset
+            : 0
+        ),
+        // ~centered (slight upward bias)
+        yOffsetPx: this.windowHeight * 0.01
+      };
+    },
+
+    centerOnFlower() {
+      const c = this.computeFlowerCenter();
+      if (!c) return;
+      this.flowchartContainer.scrollTo({
+        left: c.x * this.effectiveScale + c.xOffsetPx,
+        top: c.y * this.effectiveScale + c.yOffsetPx,
+        behavior: 'instant'
+      });
+    },
+
+    // absolute zoom percentage: 100% = userZoom 1.0.
+    currentZoomPercent() {
+      return Math.round(this.userZoom * 100);
+    },
+    setZoomPercent(pct) {
+      const target = pct / 100;
+      const clamped = Math.min(Math.max(this.userZoomMin, target), this.userZoomMax);
+      const factor = clamped / this.userZoom;
+      if (factor === 1) return;
+      this.zoomBy(factor);
+    },
+    zoomIn() {
+      const pct = this.currentZoomPercent();
+      const next = Math.floor(pct / 5) * 5 + 5;
+      this.setZoomPercent(next);
+    },
+    zoomOut() {
+      const pct = this.currentZoomPercent();
+      const prev = Math.ceil(pct / 5) * 5 - 5;
+      this.setZoomPercent(prev);
+    },
+    // "fit" button: re-fit current node's cluster into the viewport.
+    resetZoom() {
+      this.userZoom = this.fitZoomToCluster(this.flowchartStore.currentNode);
+      this.applyScale();
+      this.moveToNode(this.flowchartStore.currentNode, false, true);
     },
 
     // attach click listeners to node elements
@@ -304,20 +626,27 @@ export default {
         node.element.addEventListener('click', function() {
           const nodeClickable = ['revealed', 'next', 'current'].includes(this.getAttribute('data-state'));
 
-          if (nodeClickable) {
-            // stop exploration during playback if active
-            if (vueInstance.flowchartStore.playbackActive && vueInstance.flowchartStore.exploringDuringPlayback) {
-              vueInstance.$emit('stopExplorationDuringPlayback');
-            }
+          // any node interaction (click on a clickable node, or a teased one) closes the
+          // intro panel so the user has more room to explore.
+          vueInstance.$emit('toggleIntroPanel', true);
 
-            // if clicked node is different from current node, either jump narration to that node (if playback is active)
-            // or set node ID without affecting narration; otherwise re-center current node
-            if (nodeId !== vueInstance.flowchartStore.currentNodeId) {
-              if (vueInstance.flowchartStore.playbackActive) {
-                vueInstance.$emit('jumpNarrationToNode', nodeId);
-              } else {
-                vueInstance.$emit('setCurrentNodeId', nodeId);
+          if (nodeClickable) {
+            // passthrough labels: skip the label itself and land on its outgoing target.
+            if (vueInstance.passthroughNodeIds.includes(nodeId)) {
+              const labelNode = vueInstance.flowchartStore.flowchartNodes[nodeId];
+              if (labelNode && labelNode.outgoing.length > 0) {
+                vueInstance.markItemAsRevealed(labelNode.element);
+                const targetId = labelNode.outgoing[0].node.element.id;
+                if (targetId !== vueInstance.flowchartStore.currentNodeId) {
+                  vueInstance.$emit('setCurrentNodeId', targetId);
+                } else {
+                  vueInstance.moveToNode(vueInstance.flowchartStore.currentNode, true);
+                }
+                return;
               }
+            }
+            if (nodeId !== vueInstance.flowchartStore.currentNodeId) {
+              vueInstance.$emit('setCurrentNodeId', nodeId);
             } else {
               vueInstance.moveToNode(vueInstance.flowchartStore.currentNode, true);
             }
@@ -346,40 +675,200 @@ export default {
     },
 
     // scroll the flowchart to center on an item
-    moveToNode(item, forceMovement = false) {
-      const itemPosition = item.element.getBBox();
-      const destinationCoords = {
-        x: (itemPosition.x + itemPosition.width / 2) * this.effectiveScale - (
-          this.viewStore.introPanelVisible && this.windowWidth > this.fullWidthIntroPanelThreshold
-            ? this.introPanelWidth / 2 - this.horizontalCenterOffset
-            : 0
-        ),
-        y: (itemPosition.y + itemPosition.height / 2) * this.effectiveScale + this.windowHeight * 0.05
-      };
+    moveToNode(item, forceMovement = false, instant = false) {
+      const isFlowerNode = this.flowerNodeIds.includes(item.element.id);
 
-      const currentCoords = {
-        x: this.flowchartContainer.scrollLeft,
-        y: this.flowchartContainer.scrollTop
-      };
+      if (isFlowerNode) {
+        const wasInFlower = this.inFlowerMode;
+        this.inFlowerMode = true;
+        const flowerZoom = this.fitZoomForFlower();
 
-      const travelDistance = Math.sqrt(
-        Math.pow(currentCoords.x - destinationCoords.x, 2) + Math.pow(currentCoords.y - destinationCoords.y, 2)
+        // fresh entry from outside: snapshot current zoom so we can restore it on exit,
+        // reset override flag, and zoom-animate to flower
+        if (!wasInFlower) {
+          this.preFlowerZoom = this.userZoom;
+          this.flowerZoomOverridden = false;
+          const center = this.computeFlowerCenter();
+          if (center) {
+            this.animateZoomTo(
+              flowerZoom,
+              center.x,
+              center.y,
+              center.xOffsetPx,
+              center.yOffsetPx
+            );
+          } else {
+            this.userZoom = flowerZoom;
+            this.applyScale();
+          }
+        } else if (!this.flowerZoomOverridden && Math.abs(this.userZoom - flowerZoom) > 0.001) {
+          // already in flower and user hasn't overridden, but zoom drifted: re-snap
+          this.userZoom = flowerZoom;
+          this.applyScale();
+        }
+
+        this.updateAppearance();
+        return;
+      }
+
+      // detect whether we're transitioning out of the flower so we can restore zoom
+      const leavingFlower = this.inFlowerMode;
+      this.inFlowerMode = false;
+      this.flowerZoomOverridden = false;
+
+      // flower-zoom nodes: stay at the flower's zoom level and center on the bbox of
+      // [node, ...outgoing]. used when default zoom is too tight to show both endpoints
+      // (long curved arrows like n-037 → n-035). per-node offsets layer on top.
+      if (this.flowerZoomNodeIds.includes(item.element.id)) {
+        // when arriving from the flower, retain the *exact* current userZoom (no
+        // recompute) so there's zero perceived zoom drift. Otherwise compute flower fit.
+        const targetZoom = leavingFlower ? this.userZoom : this.fitZoomForFlower();
+        const ids = [item.element.id, ...item.outgoing.map(o => o.node.element.id)];
+        const center = this.computeClusterCenter(ids);
+        if (center) {
+          const override = this.nodeViewportOffsets[item.element.id];
+          const xOff = center.xOffsetPx + this.windowWidth * (override?.xFactor ?? 0);
+          const yOff = center.yOffsetPx + this.windowHeight * (override?.yFactor ?? 0);
+          if (Math.abs(targetZoom - this.userZoom) > 0.001) {
+            this.animateZoomTo(targetZoom, center.x, center.y, xOff, yOff);
+          } else {
+            this.smoothScroll(
+              center.x * this.effectiveScale + xOff,
+              center.y * this.effectiveScale + yOff,
+              500
+            );
+          }
+          this.updateAppearance();
+          return;
+        }
+      }
+
+      // cluster entry node (e.g. "Explore global examples"): fit the children's
+      // bbox into a target fraction of the viewport.
+      const clusterCfg = this.clusterEntryNodes[item.element.id];
+      if (clusterCfg) {
+        const center = this.computeClusterCenter(clusterCfg.ids);
+        if (center) {
+          const clusterEls = clusterCfg.ids
+            .map(id => this.flowchartStore.flowchartNodes[id]?.element)
+            .filter(Boolean);
+          const targetZoom = this.zoomToFit(clusterEls, clusterCfg.fraction);
+          if (Math.abs(targetZoom - this.userZoom) > 0.001) {
+            this.animateZoomTo(targetZoom, center.x, center.y, center.xOffsetPx, center.yOffsetPx);
+          } else {
+            this.smoothScroll(
+              center.x * this.effectiveScale + center.xOffsetPx,
+              center.y * this.effectiveScale + center.yOffsetPx,
+              500
+            );
+          }
+          this.updateAppearance();
+          return;
+        }
+      }
+
+      // determine target zoom:
+      //   - leaving flower: restore preFlowerZoom so the user returns to where they were
+      //   - fit-cluster nodes (case studies): zoom to fit node + outgoing
+      //   - otherwise: keep current zoom
+      const oldZoom = this.userZoom;
+      let targetZoom = oldZoom;
+      if (leavingFlower && this.preFlowerZoom != null) {
+        targetZoom = this.preFlowerZoom;
+      }
+      const isFitCluster = this.fitClusterNodeIds.includes(item.element.id);
+      if (isFitCluster) {
+        // fixed zoom so every case study lands at the same magnification
+        targetZoom = this.caseStudyZoom;
+      }
+
+      // for fit-to-cluster nodes, center on the cluster's bbox center so the outgoing
+      // neighbors stay visible. otherwise center on the node itself.
+      let nodeCenterX, nodeCenterY;
+      if (isFitCluster) {
+        const ids = [item.element.id, ...item.outgoing.map(o => o.node.element.id)];
+        const c = this.computeClusterCenter(ids);
+        nodeCenterX = c ? c.x : item.element.getBBox().x;
+        nodeCenterY = c ? c.y : item.element.getBBox().y;
+      } else {
+        const bb = item.element.getBBox();
+        nodeCenterX = bb.x + bb.width / 2;
+        nodeCenterY = bb.y + bb.height / 2;
+      }
+
+      // viewport offset: per-node override > n-017 special case > default.
+      const override = this.nodeViewportOffsets[item.element.id];
+      const xOffsetFactor = override?.xFactor ?? 0;
+      const yOffsetFactor = override?.yFactor
+        ?? (item.element.id === 'n-017' ? 0.20 : 0.05);
+
+      const panelOffset = -(
+        this.viewStore.introPanelVisible && this.windowWidth > this.fullWidthIntroPanelThreshold
+          ? this.introPanelWidth / 2 - this.horizontalCenterOffset
+          : 0
       );
+      const xOffsetPx = panelOffset + this.windowWidth * xOffsetFactor;
+      const yOffsetPx = isFitCluster ? 0 : this.windowHeight * yOffsetFactor;
 
-      // omit movement if playback is active and distance from viewport center to destination node falls below threshold
-      if (forceMovement || !this.flowchartStore.playbackActive || travelDistance > this.travelThreshold) {
-        const duration = Math.min(
-          Math.max(
-            travelDistance * this.transitionParameters.distanceFactor,
-            this.transitionParameters.minDuration
-          ),
-          this.transitionParameters.maxDuration
-        );
+      const zoomChanged = Math.abs(targetZoom - oldZoom) > 0.001;
 
-        this.smoothScroll(destinationCoords.x, destinationCoords.y, duration);
+      if (!zoomChanged) {
+        // no zoom change — smoothly pan to destination (zoom stable so no slide artifact).
+        this.userZoom = targetZoom;
+        this.applyScale();
+        const destLeft = nodeCenterX * this.effectiveScale + xOffsetPx;
+        const destTop = nodeCenterY * this.effectiveScale + yOffsetPx;
+        if (instant) {
+          this.flowchartContainer.scrollTo({ left: destLeft, top: destTop, behavior: 'instant' });
+        } else {
+          this.smoothScroll(destLeft, destTop, 500);
+        }
+      } else {
+        // zoom changing — animate userZoom over time and recompute scroll each frame
+        // so the destination node stays anchored at its target viewport position.
+        // No positional sliding — the user just sees a smooth zoom in/out.
+        this.animateZoomTo(targetZoom, nodeCenterX, nodeCenterY, xOffsetPx, yOffsetPx);
       }
 
       this.updateAppearance();
+    },
+
+    // animate zoom and pan together over `duration` ms. interpolates the SVG anchor
+    // point from "what is currently at viewport center" to the destination point, and
+    // userZoom from current → target. yields a single smooth motion (no snap-then-zoom).
+    animateZoomTo(targetZoom, destSvgX, destSvgY, destXOffsetPx, destYOffsetPx, duration = 600) {
+      const startZoom = this.userZoom;
+      const zoomScale = this.zoomScale;
+      const startScale = zoomScale * startZoom;
+      // SVG point currently at viewport center (= scrollLeft / scale, since margin = 50vw)
+      const startSvgX = this.flowchartContainer.scrollLeft / startScale;
+      const startSvgY = this.flowchartContainer.scrollTop / startScale;
+      const startTime = Date.now();
+
+      const step = () => {
+        const elapsed = Date.now() - startTime;
+        const t = Math.min(elapsed / duration, 1);
+        const eased = easeCubicInOut(t);
+
+        const z = startZoom + (targetZoom - startZoom) * eased;
+        const svgX = startSvgX + (destSvgX - startSvgX) * eased;
+        const svgY = startSvgY + (destSvgY - startSvgY) * eased;
+        const xOff = destXOffsetPx * eased;
+        const yOff = destYOffsetPx * eased;
+
+        this.userZoom = z;
+        this.flowchartElement.setAttribute('width', this.flowchartWidth * zoomScale * z);
+        this.flowchartElement.setAttribute('height', this.flowchartHeight * zoomScale * z);
+
+        this.flowchartContainer.scrollTo({
+          left: svgX * zoomScale * z + xOff,
+          top: svgY * zoomScale * z + yOff,
+          behavior: 'instant'
+        });
+
+        if (t < 1) requestAnimationFrame(step);
+      };
+      step();
     },
 
     // smooth scroll to coordinate using custom duration and easing
@@ -391,8 +880,8 @@ export default {
       const step = () => {
         const elapsed = Date.now() - time;
         const scrolling = elapsed < duration;
-        const x = scrolling ? xStart + (xEnd - xStart) * easeExpOut(elapsed / duration) : xEnd;
-        const y = scrolling ? yStart + (yEnd - yStart) * easeExpOut(elapsed / duration) : yEnd;
+        const x = scrolling ? xStart + (xEnd - xStart) * easeCubicInOut(elapsed / duration) : xEnd;
+        const y = scrolling ? yStart + (yEnd - yStart) * easeCubicInOut(elapsed / duration) : yEnd;
 
         if (scrolling) {
           requestAnimationFrame(step);
@@ -426,11 +915,13 @@ export default {
       });
 
       this.flowchartStore.teasedItems.forEach(id => {
-        document.getElementById(id).setAttribute('data-state', 'teased');
+        const el = document.getElementById(id);
+        if (el) el.setAttribute('data-state', 'teased');
       });
 
       this.flowchartStore.revealedItems.forEach(id => {
-        document.getElementById(id).setAttribute('data-state', 'revealed');
+        const el = document.getElementById(id);
+        if (el) el.setAttribute('data-state', 'revealed');
       });
 
       this.flowchartStore.currentNode.outgoing.forEach(item => {
@@ -471,56 +962,13 @@ export default {
       if (this.flowchartStore.teasedItems.indexOf(node.id) === -1) {
         this.flowchartStore.teasedItems.push(node.id);
       }
-    },
-
-    // add timestamp/event index to listenedTimestampIndexes array
-    markTimestampAsListened(index) {
-      if (this.flowchartStore.listenedTimestampIndexes.indexOf(index) === -1) {
-        this.flowchartStore.listenedTimestampIndexes.push(index);
-      }
     }
   },
 
   watch: {
-    // when a new node ID is set, move to the updated (now current) node ID,
-    // unless exploration during playback is active, in which case only refresh appearance
     'flowchartStore.currentNodeId'() {
-      if (!this.flowchartStore.exploringDuringPlayback) {
-        this.moveToNode(this.flowchartStore.currentNode);
-      } else {
-        this.updateAppearance();
-      }
-    },
-
-    // update current node ID upon change of narration node ID (which changes based on playback position)
-    'flowchartStore.currentNarrationNodeId'() {
-      this.$emit('setCurrentNodeId', this.flowchartStore.currentNarrationNodeId);
-
-      // start playback if not active already (happens when jumpNarrationToNode is triggered)
-      if (!this.flowchartStore.playbackActive) {
-        this.$emit('startPlayback', true);
-      }
-    },
-
-    // when the narration index changes, mark that timestamp/event as listened
-    'flowchartStore.currentNarrationNodeIndex'() {
-      this.markTimestampAsListened(this.flowchartStore.currentNarrationNodeIndex);
-    },
-
-    // when playback is started, move to current node (if current node
-    // does not change, no movement is otherwise initiated)
-    'flowchartStore.playbackActive'() {
-      if (this.flowchartStore.playbackActive) {
-        this.moveToNode(this.flowchartStore.currentNode);
-      }
-    },
-
-    // move back to current node if exploration during playback ends
-    'flowchartStore.exploringDuringPlayback'() {
-      if (!this.flowchartStore.exploringDuringPlayback && this.flowchartStore.playbackActive) {
-        this.moveToNode(this.flowchartStore.currentNode, true);
-      }
-    },
+      this.moveToNode(this.flowchartStore.currentNode);
+    }
   },
 
   created() {
@@ -556,6 +1004,49 @@ export default {
     cursor: grabbing;
   }
 
+  .loader {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    pointer-events: none;
+    background: rgb(var(--background-color));
+    transition: opacity 0.25s var(--transition-timing), visibility 0.25s var(--transition-timing), left 0.25s var(--transition-timing);
+
+    &.panel-visible {
+      left: var(--panel-width);
+    }
+
+    &.hidden {
+      opacity: 0;
+      visibility: hidden;
+    }
+  }
+
+  @media (max-width: 600px) {
+    .loader.panel-visible {
+      left: 0;
+    }
+  }
+
+  .spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid rgba(99, 33, 29, 0.2);
+    border-top-color: #63211D;
+    border-radius: 50%;
+    animation: flowchart-spin 0.8s linear infinite;
+  }
+
+  @keyframes flowchart-spin {
+    to { transform: rotate(360deg); }
+  }
+
   svg {
     opacity: 0;
     visibility: hidden;
@@ -567,8 +1058,10 @@ export default {
       visibility: visible;
     }
 
-    // nodes
-    [id^=n-] {
+    // nodes — scoped to <g> so inner text paths (which Figma exports with the same id
+    // as their parent layer, e.g. <path id="n-065_2"> inside <g id="n-065">) aren't
+    // hidden by the opacity:0 rule.
+    g[id^=n-] {
       opacity: 0;
       pointer-events: none;
 
@@ -624,6 +1117,12 @@ export default {
         opacity: 1;
       }
 
+      // flower base layer: petals/cells always visible as a gray silhouette unless
+      // a colored state alternate has replaced the primary.
+      &.flower-default:not(.replaced-out) {
+        opacity: 1;
+      }
+
       &.pulse {
         animation: pulse 0.6s 1 backwards ease-in-out;
       }
@@ -662,6 +1161,99 @@ export default {
 
   25%, 75% {
     opacity: 0.35;
+  }
+}
+
+.zoom-controls {
+  position: fixed;
+  z-index: 50;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+  font-family: inherit;
+  font-size: 13px;
+  color: rgb(var(--text-color));
+  transition: left 0.25s var(--transition-timing);
+
+  &.panel-visible {
+    left: calc(50% + var(--panel-width) / 2);
+  }
+
+  .zoom-btn {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: inherit;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    &:hover {
+      background: rgba(0, 0, 0, 0.06);
+    }
+
+    &.fit {
+      font-size: 14px;
+    }
+  }
+
+  .zoom-readout {
+    min-width: 48px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+  }
+
+  .zoom-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 140px;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(0, 0, 0, 0.15);
+    outline: none;
+    cursor: pointer;
+
+    &::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #63211D;
+      cursor: pointer;
+      border: none;
+    }
+
+    &::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #63211D;
+      cursor: pointer;
+      border: none;
+    }
+  }
+}
+
+@media (max-width: 600px) {
+  .zoom-controls.panel-visible {
+    left: 50%;
   }
 }
 </style>
