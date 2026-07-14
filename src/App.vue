@@ -9,6 +9,8 @@
     :siteSubtitle="userSetup.subtitle"
     @toggleIntroPanel="toggleIntroPanel()"
   />
+  <TheHowToPopup />
+  <TheEndPanel />
 </template>
 
 <script>
@@ -16,6 +18,8 @@ import { mapStores, mapActions } from 'pinia';
 
 import TheFlowchart from '@/components/TheFlowchart.vue';
 import TheIntroPanel from '@/components/TheIntroPanel.vue';
+import TheHowToPopup from '@/components/TheHowToPopup.vue';
+import TheEndPanel from '@/components/TheEndPanel.vue';
 
 import { useFlowchartStore } from '@/stores/FlowchartStore.js';
 import { useViewStore } from '@/stores/ViewStore.js';
@@ -25,7 +29,9 @@ export default {
 
   components: {
     TheFlowchart,
-    TheIntroPanel
+    TheIntroPanel,
+    TheHowToPopup,
+    TheEndPanel
   },
 
   data() {

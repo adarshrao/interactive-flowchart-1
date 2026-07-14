@@ -26,6 +26,8 @@
       <button class="zoom-btn fit" title="Reset to 100%" @click="resetZoom">⤢</button>
     </div>
     <button class="reveal-all-btn" title="Reveal everything so you can explore at your own pace" @click="revealAll">Reveal all</button>
+    <button class="next-steps-btn" title="Learn more and get involved" @click="viewStore.endPanelVisible = true">Learn More</button>
+    <button class="help-btn" title="How to use" aria-label="How to use" @click="viewStore.howToVisible = true">?</button>
   </div>
 </template>
 
@@ -144,9 +146,6 @@ export default {
         minDuration: 500,
         maxDuration: 1000
       },
-
-      // count of how many times teased nodes have been attempted to be clicked
-      teasedClickAttempts: 0,
 
       // fixed pixel values
       introPanelWidth: 416,
@@ -352,6 +351,7 @@ export default {
       this.reorderFlowerLayers();
       this.prepareFlowerBaseLayer();
       this.addNodeInteractivity();
+      this.markAllDormant();
       this.fitInitialZoom();
       this.moveToNode(this.flowchartStore.currentNode, false, true);
     },
@@ -631,6 +631,9 @@ export default {
         this.markItemAsRevealed(node.element);
         node.outgoing.forEach(item => this.markItemAsRevealed(item.edge));
       });
+      // flower petals reveal via this flag rather than the revealed state (see
+      // updateAppearance) — otherwise Reveal all leaves the flower dark.
+      this.flowchartStore.revealedAll = true;
       this.updateAppearance();
       this.flowchartStore.saveToLocalStorage?.();
     },
@@ -647,57 +650,88 @@ export default {
 
       Object.entries(this.flowchartStore.flowchartNodes).forEach(([nodeId, node]) => {
         node.element.addEventListener('click', function() {
-          // flower petals are always clickable regardless of data-state — the design
-          // lets you jump to any petal in any order rather than walking the chain.
-          const isFlower = vueInstance.flowerNodeIds.includes(nodeId);
-          const nodeClickable = isFlower || ['revealed', 'next', 'current'].includes(this.getAttribute('data-state'));
-
-          // any node interaction (click on a clickable node, or a teased one) closes the
-          // intro panel so the user has more room to explore.
+          // any node interaction closes the intro panel so the user has more room
+          // to explore.
           vueInstance.$emit('toggleIntroPanel', true);
 
-          if (nodeClickable) {
-            // passthrough labels: skip the label itself and land on its outgoing target.
-            if (vueInstance.passthroughNodeIds.includes(nodeId)) {
-              const labelNode = vueInstance.flowchartStore.flowchartNodes[nodeId];
-              if (labelNode && labelNode.outgoing.length > 0) {
-                vueInstance.markItemAsRevealed(labelNode.element);
-                const targetId = labelNode.outgoing[0].node.element.id;
-                if (targetId !== vueInstance.flowchartStore.currentNodeId) {
-                  vueInstance.$emit('setCurrentNodeId', targetId);
-                } else {
-                  vueInstance.moveToNode(vueInstance.flowchartStore.currentNode, true);
-                }
-                return;
-              }
-            }
-            if (nodeId !== vueInstance.flowchartStore.currentNodeId) {
-              vueInstance.$emit('setCurrentNodeId', nodeId);
-            } else {
-              vueInstance.moveToNode(vueInstance.flowchartStore.currentNode, true);
-            }
-          } else if (this.getAttribute('data-state') === 'teased') {
-            // if teased node is clicked, trigger the pulse animation for all incoming nodes
-            node.incoming.forEach(incomingObject => {
-              let incomingNode = incomingObject.node.element;
+          // every node is clickable: reveal it and the whole path of nodes/edges
+          // leading up to it, so there are no dead-end clicks.
+          vueInstance.revealPathTo(nodeId);
 
-              if (vueInstance.flowchartStore.revealedItems.includes(incomingNode.id)) {
-                incomingNode = vueInstance.findReplacementElement(incomingNode, incomingNode.getAttribute('data-state')) ?? incomingNode;
-  
-                incomingNode.classList.remove('pulse');
-                void incomingNode.getBBox(); // trigger reflow
-                incomingNode.classList.add('pulse');
+          // passthrough labels: skip the label itself and land on its outgoing target.
+          if (vueInstance.passthroughNodeIds.includes(nodeId)) {
+            const labelNode = vueInstance.flowchartStore.flowchartNodes[nodeId];
+            if (labelNode && labelNode.outgoing.length > 0) {
+              vueInstance.markItemAsRevealed(labelNode.element);
+              const targetId = labelNode.outgoing[0].node.element.id;
+              if (targetId !== vueInstance.flowchartStore.currentNodeId) {
+                vueInstance.$emit('setCurrentNodeId', targetId);
+              } else {
+                vueInstance.moveToNode(vueInstance.flowchartStore.currentNode, true);
               }
-            });
-
-            // display hint alert upon third click attempt
-            vueInstance.teasedClickAttempts++;
-            if (vueInstance.teasedClickAttempts === 3) {
-              alert('In order to reveal this item of the flowchart, please select any item pointing here first.');
+              return;
             }
+          }
+
+          if (nodeId !== vueInstance.flowchartStore.currentNodeId) {
+            vueInstance.$emit('setCurrentNodeId', nodeId);
+          } else {
+            vueInstance.moveToNode(vueInstance.flowchartStore.currentNode, true);
           }
         });
       });
+    },
+
+    // reveal a node and every node/edge on the paths leading up to it (its
+    // ancestors), walking backward through incoming connections. lets any click
+    // "just work" by lighting up how you'd get there.
+    revealPathTo(nodeId) {
+      const start = this.flowchartStore.flowchartNodes[nodeId];
+      if (!start) return;
+
+      this.markItemAsRevealed(start.element);
+      const visited = new Set([nodeId]);
+      const queue = [start];
+
+      while (queue.length) {
+        const node = queue.shift();
+        node.incoming.forEach(incoming => {
+          this.markItemAsRevealed(incoming.edge);
+          this.markItemAsRevealed(incoming.node.element);
+
+          const previousId = incoming.node.element.id;
+          if (!visited.has(previousId)) {
+            visited.add(previousId);
+            queue.push(incoming.node);
+          }
+        });
+      }
+    },
+
+    // show the whole chart up front as dark silhouettes: mark every node and edge
+    // teased so nothing starts invisible. Revealing a node overrides its teased
+    // state per-item (see updateAppearance).
+    markAllDormant() {
+      Object.values(this.flowchartStore.flowchartNodes).forEach(node => {
+        this.markItemAsTeased(node.element);
+        node.outgoing.forEach(item => this.markItemAsTeased(item.edge));
+      });
+    },
+
+    // auto-open the end panel once the user has reached the Flower's center
+    // ("Values", n-057) AND viewed at least one case study. Only fires once.
+    maybeOpenEndPanel() {
+      if (this.flowchartStore.endPanelShown) return;
+
+      const visited = this.flowchartStore.visitedNodes;
+      const flowerCentreVisited = visited.includes('n-057');
+      const caseStudyVisited = this.fitClusterNodeIds.some(id => visited.includes(id));
+
+      if (flowerCentreVisited && caseStudyVisited) {
+        this.flowchartStore.endPanelShown = true;
+        this.viewStore.endPanelVisible = true;
+        this.flowchartStore.saveToLocalStorage?.();
+      }
     },
 
     // scroll the flowchart to center on an item
@@ -925,14 +959,19 @@ export default {
 
     // update classes/appearance of svg elements
     updateAppearance() {
-      // outgoing nodes are iterated over again further down, sequence could be improved
+      // reveal the next two nodes ahead so the path is readable. Everything else
+      // stays in its dark "teased" baseline (see markAllDormant).
       this.flowchartStore.currentNode.outgoing.forEach(item => {
+        // 1 step ahead: revealed, and highlighted as "next" further down.
         this.markItemAsRevealed(item.edge);
         this.markItemAsRevealed(item.node.element);
 
         item.node.outgoing.forEach(subsequentItem => {
-          this.markItemAsTeased(subsequentItem.edge);
-          this.markItemAsTeased(subsequentItem.node.element);
+          // 2 steps ahead: reveal fully so the content is readable and clickable.
+          // No "next" highlight — that emphasis stays on the immediate next node
+          // only, keeping a clear primary-vs-upcoming distinction.
+          this.markItemAsRevealed(subsequentItem.edge);
+          this.markItemAsRevealed(subsequentItem.node.element);
         });
       });
 
@@ -958,11 +997,26 @@ export default {
       const currentEl = this.flowchartStore.currentNode.element;
       currentEl.setAttribute('data-state', 'current');
       this.markItemAsRevealed(currentEl);
+
+      // record this node as visited, then see if the user has now finished
+      // enough of the map to surface the end panel.
+      if (!this.flowchartStore.visitedNodes.includes(currentEl.id)) {
+        this.flowchartStore.visitedNodes.push(currentEl.id);
+      }
+      this.maybeOpenEndPanel();
       // flower petals: once a petal has been current at any point, mark it visited so
       // it permanently switches from the unvisited #523535 look to the default
       // gray-plus-text view (per design — clicking is what reveals).
       if (this.flowerNodeIds.includes(currentEl.id)) {
         currentEl.classList.add('flower-visited');
+      }
+
+      // "Reveal all" reveals the flower too: switch every petal to its gray +
+      // text (visited) look, since petals ignore the normal revealed state.
+      if (this.flowchartStore.revealedAll) {
+        this.flowerNodeIds.forEach(id => {
+          this.flowchartStore.flowchartNodes[id]?.element.classList.add('flower-visited');
+        });
       }
 
       // replace primary elements with alternate state variants if those exist.
@@ -1123,12 +1177,13 @@ export default {
       }
 
       &[data-state=teased]:not(.flower-default) {
-        cursor: not-allowed;
+        cursor: pointer;
       }
 
       &[data-state=teased]:not(.replaced-out):not(.flower-default) {
         // solid silhouette: hide text glyphs (always rendered as a direct <path> child),
-        // keep the background shape and force a solid black fill
+        // keep the background shape and fill it the flower's dark maroon so the
+        // whole un-revealed chart reads as one dormant surface.
         > path {
           display: none;
         }
@@ -1138,13 +1193,13 @@ export default {
           filter: none;
 
           path, circle, ellipse {
-            fill: #000;
+            fill: #523535;
           }
         }
 
         // textbox nodes: bare <rect> background
         > rect {
-          fill: #000;
+          fill: #523535;
         }
       }
 
@@ -1331,6 +1386,53 @@ export default {
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  transition: background 0.15s ease;
+
+  &:hover {
+    background: rgba(255, 255, 255, 1);
+  }
+}
+
+.next-steps-btn {
+  height: 40px;
+  padding: 0 16px;
+  appearance: none;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+  color: rgb(var(--text-color));
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease;
+
+  &:hover {
+    background: rgba(255, 255, 255, 1);
+  }
+}
+
+.help-btn {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  appearance: none;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+  color: rgb(var(--text-color));
+  font-family: inherit;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
   transition: background 0.15s ease;
 
   &:hover {

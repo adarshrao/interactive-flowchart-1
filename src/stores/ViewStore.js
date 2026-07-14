@@ -2,6 +2,8 @@ import { defineStore } from 'pinia';
 
 export const useViewStore = defineStore('view', {
   state: () => ({
-    introPanelVisible: true
+    introPanelVisible: true,
+    howToVisible: false,
+    endPanelVisible: false
   })
 });
