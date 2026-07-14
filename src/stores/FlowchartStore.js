@@ -8,12 +8,23 @@ export const useFlowchartStore = defineStore('flowchart', {
     currentNodeId: 'n-001',
     teasedItems: [],
     revealedItems: [],
+    // ids of nodes that have been the current node at some point. Drives the
+    // end-panel completion check (see TheFlowchart.maybeOpenEndPanel).
+    visitedNodes: [],
+    // whether the end panel has already auto-opened once (so it doesn't nag).
+    endPanelShown: false,
+    // whether the user hit "Reveal all" — flower petals reveal via this flag
+    // (they don't respond to the normal revealed state; see updateAppearance).
+    revealedAll: false,
 
     // Properties persisted to localStorage. currentNodeId intentionally excluded
     // so refresh always lands on the first node.
     storedProperties: [
       'teasedItems',
-      'revealedItems'
+      'revealedItems',
+      'visitedNodes',
+      'endPanelShown',
+      'revealedAll'
     ],
     resumedFromLocalStorage: false,
     resetActionAvailable: false
