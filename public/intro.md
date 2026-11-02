@@ -10,6 +10,4 @@ Explore the chart yourself by selecting any visible items and moving along step 
 
 # Credits
 
-This interactive flowchart was designed and built by [Deepika Nandan](https://deepikanandan.com) for [Vikalp Sangam](https://vikalpsangam.org/). Examples and source material were drawn from the [Vikalp Sangam](https://vikalpsangam.org/) and [Radical Ecological Democracy](https://radicalecologicaldemocracy.org/) websites and adapted for this format. Built using the interactive flowchart template developed by UCLAB at the University of Applied Sciences Potsdam.
-
-Members of [Kalpavriksh](https://kalpavriksh.org/) contributed to the project by providing content and feedback.
+This interactive flowchart was designed and built by [Deepika Nandan](https://deepikanandan.com) for [Vikalp Sangam](https://vikalpsangam.org/). Examples and source material were drawn from the [Vikalp Sangam](https://vikalpsangam.org/) and [Radical Ecological Democracy](https://radicalecologicaldemocracy.org/) websites and adapted for this format. Built using the interactive flowchart template developed by UCLAB at the University of Applied Sciences Potsdam. Members of [Kalpavriksh](https://kalpavriksh.org/) contributed to the project by providing content and feedback.
