@@ -1,10 +1,17 @@
 <template>
   <div ref="container" class="flowchart">
     <div class="loader" :class="{ hidden: flowchartElement, 'panel-visible': viewStore.introPanelVisible }">
-      <div class="spinner" />
+      <!-- shown only if the "How to use" popup is closed before loading finishes;
+           otherwise the popup carries the title and loading line itself -->
+      <transition name="loading-fade">
+        <div v-if="viewStore.howToDismissed && !viewStore.howToVisible" class="loading-standalone" role="status" aria-label="Loading">
+          <p class="loading-title loading-standalone-title" v-text="siteTitle" />
+          <span class="loading-indicator"><span class="loading-ring" /><span class="loading-text">Loading<span class="loading-dots"><span>.</span><span>.</span><span>.</span></span></span></span>
+        </div>
+      </transition>
     </div>
     <InlineSvg
-      src="flowchart-6-renamed.svg"
+      src="flowchart-6-deduped.svg"
       :class="{ ready: flowchartElement }"
       @loaded="flowchartReady($event)"
     />
@@ -21,13 +28,25 @@
         :value="currentZoomPercent()"
         @input="setZoomPercent(parseInt($event.target.value))"
       />
-      <span class="zoom-readout">{{ currentZoomPercent() }}%</span>
       <button class="zoom-btn" title="Zoom in" @click="zoomIn">+</button>
       <button class="zoom-btn fit" title="Reset to 100%" @click="resetZoom">⤢</button>
     </div>
-    <button class="reveal-all-btn" title="Reveal everything so you can explore at your own pace" @click="revealAll">Reveal all</button>
-    <button class="next-steps-btn" title="Learn more and get involved" @click="viewStore.endPanelVisible = true">Learn More</button>
-    <button class="help-btn" title="How to use" aria-label="How to use" @click="viewStore.howToVisible = true">?</button>
+    <div class="action-buttons">
+      <button
+        class="reveal-all-btn"
+        :class="{ 'is-revealed': flowchartStore.revealedAll }"
+        :title="flowchartStore.revealedAll ? 'Hide again and go back to exploring step by step' : 'Reveal everything so you can explore at your own pace'"
+        :aria-pressed="flowchartStore.revealedAll ? 'true' : 'false'"
+        @click="toggleRevealAll"
+      >
+        <!-- both labels share one grid cell, so the button is always as wide as
+             the longer one and doesn't change size when toggled -->
+        <span :class="{ hidden: flowchartStore.revealedAll }">Reveal all</span>
+        <span :class="{ hidden: !flowchartStore.revealedAll }" aria-hidden="true">Revealed</span>
+      </button>
+      <button class="next-steps-btn" title="Learn more and get involved" @click="toggleEndPanel">Learn More</button>
+      <button class="help-btn" title="How to use" aria-label="How to use" @click="toggleHowTo">?</button>
+    </div>
   </div>
 </template>
 
@@ -45,6 +64,10 @@ export default {
 
   components: {
     InlineSvg
+  },
+
+  props: {
+    siteTitle: String
   },
 
   emits: [
@@ -150,6 +173,10 @@ export default {
       // fixed pixel values
       introPanelWidth: 416,
       fullWidthIntroPanelThreshold: 600,
+      // share of the screen the first node + its options fill when opening on mobile
+      mobileInitialFitFraction: 0.92,
+      // how far (as a share of screen height) the first node starts above centre on mobile
+      mobileInitialShiftUp: 0.18,
       horizontalCenterOffset: 24,
     }
   },
@@ -217,6 +244,86 @@ export default {
       this.flowchartContainer.addEventListener('touchmove', () => {
         this.$emit('toggleIntroPanel', true);
       });
+
+      // two-finger pinch on touch screens zooms the flowchart (not the page).
+      // Re-rendering the large SVG on every touchmove is far too slow on phones, so
+      // during the gesture we only apply a cheap CSS transform (GPU-scaled preview),
+      // then commit the real zoom + scroll once when the fingers lift.
+      const touchDistance = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+      const touchMidpoint = t => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
+      let pinch = null;
+      let pinchFrame = null;
+
+      const renderPinch = () => {
+        pinchFrame = null;
+        if (!pinch) return;
+        this.flowchartElement.style.transform =
+          `translate(${pinch.dx}px, ${pinch.dy}px) scale(${pinch.scale})`;
+      };
+
+      const endPinch = () => {
+        if (!pinch) return;
+        const { scale, dx, dy, anchorX, anchorY } = pinch;
+        pinch = null;
+        if (pinchFrame) cancelAnimationFrame(pinchFrame);
+        pinchFrame = null;
+
+        this.flowchartElement.style.transform = '';
+        this.flowchartElement.style.transformOrigin = '';
+        this.flowchartElement.style.willChange = '';
+
+        // same result as the preview: zoom around where the pinch started, then pan
+        // by how far the fingers' midpoint moved
+        this.zoomBy(scale, anchorX, anchorY);
+        this.flowchartContainer.scrollLeft -= dx;
+        this.flowchartContainer.scrollTop -= dy;
+      };
+
+      this.flowchartContainer.addEventListener('touchstart', event => {
+        if (event.touches.length !== 2) return;
+        // stop the browser from treating the second finger as part of a scroll
+        event.preventDefault();
+
+        const midpoint = touchMidpoint(event.touches);
+        const containerRect = this.flowchartContainer.getBoundingClientRect();
+        const svgRect = this.flowchartElement.getBoundingClientRect();
+
+        pinch = {
+          startDistance: touchDistance(event.touches),
+          startMidpoint: midpoint,
+          anchorX: midpoint.x - containerRect.left,
+          anchorY: midpoint.y - containerRect.top,
+          scale: 1,
+          dx: 0,
+          dy: 0
+        };
+
+        this.flowchartElement.style.transformOrigin =
+          `${midpoint.x - svgRect.left}px ${midpoint.y - svgRect.top}px`;
+        this.flowchartElement.style.willChange = 'transform';
+      }, { passive: false });
+
+      this.flowchartContainer.addEventListener('touchmove', event => {
+        if (!pinch || event.touches.length !== 2) return;
+        event.preventDefault();
+
+        const midpoint = touchMidpoint(event.touches);
+        const rawScale = touchDistance(event.touches) / pinch.startDistance;
+        // keep the preview inside the same zoom limits the real zoom uses
+        const minScale = this.userZoomMin / this.userZoom;
+        const maxScale = this.userZoomMax / this.userZoom;
+
+        pinch.scale = Math.min(Math.max(minScale, rawScale), maxScale);
+        pinch.dx = midpoint.x - pinch.startMidpoint.x;
+        pinch.dy = midpoint.y - pinch.startMidpoint.y;
+
+        if (!pinchFrame) pinchFrame = requestAnimationFrame(renderPinch);
+      }, { passive: false });
+
+      this.flowchartContainer.addEventListener('touchend', event => {
+        if (event.touches.length < 2) endPinch();
+      });
+      this.flowchartContainer.addEventListener('touchcancel', endPinch);
 
       // wheel: scroll = pan (native), Ctrl/⌘+wheel or trackpad pinch (ctrlKey=true) = zoom around cursor
       this.flowchartContainer.addEventListener('wheel', event => {
@@ -354,6 +461,14 @@ export default {
       this.markAllDormant();
       this.fitInitialZoom();
       this.moveToNode(this.flowchartStore.currentNode, false, true);
+
+      // mobile: place the first node higher up so the next (covered) block below
+      // it is on screen too
+      if (this.windowWidth <= this.fullWidthIntroPanelThreshold) {
+        this.flowchartContainer.scrollTop += this.windowHeight * this.mobileInitialShiftUp;
+      }
+
+      this.viewStore.flowchartLoaded = true;
     },
 
     // Each Figma state frame exports a full-canvas <rect> as its background. With
@@ -500,7 +615,13 @@ export default {
     },
 
     fitInitialZoom() {
-      const z = this.fitZoomToCluster(this.flowchartStore.currentNode);
+      const node = this.flowchartStore.currentNode;
+      // on mobile, fit the first node and the options it leads to across nearly the
+      // full screen width, so it's readable and you can see there are choices.
+      // raise/lower mobileInitialFitFraction to zoom out/in on load.
+      const z = this.windowWidth <= this.fullWidthIntroPanelThreshold
+        ? this.zoomToFit([node?.element, ...(node?.outgoing || []).map(o => o.node.element)], this.mobileInitialFitFraction)
+        : this.fitZoomToCluster(node);
       this.userZoom = z;
       this.applyScale();
     },
@@ -605,12 +726,43 @@ export default {
     currentZoomPercent() {
       return Math.round(this.userZoom * 100);
     },
+    // used by the slider and the −/+ buttons. Zooms around the point at the centre
+    // of the screen. That point is remembered for the whole slider drag (in
+    // unscaled SVG units) and the scroll is recomputed from it each step; calling
+    // zoomBy step after step instead made the view drift, because every step's
+    // scroll position gets rounded to whole pixels and the errors add up.
     setZoomPercent(pct) {
       const target = pct / 100;
       const clamped = Math.min(Math.max(this.userZoomMin, target), this.userZoomMax);
-      const factor = clamped / this.userZoom;
-      if (factor === 1) return;
-      this.zoomBy(factor);
+      if (clamped === this.userZoom) return;
+
+      if (this.inFlowerMode) {
+        this.flowerZoomOverridden = true;
+      }
+
+      const container = this.flowchartContainer;
+      const rect = container.getBoundingClientRect();
+      const marginX = 0.5 * this.windowWidth;
+      const marginY = 0.5 * this.windowHeight;
+
+      if (!this.sliderAnchor) {
+        this.sliderAnchor = {
+          x: (container.scrollLeft + rect.width / 2 - marginX) / this.effectiveScale,
+          y: (container.scrollTop + rect.height / 2 - marginY) / this.effectiveScale
+        };
+      }
+
+      this.userZoom = clamped;
+      this.applyScale();
+      container.scrollLeft = this.sliderAnchor.x * this.effectiveScale + marginX - rect.width / 2;
+      container.scrollTop = this.sliderAnchor.y * this.effectiveScale + marginY - rect.height / 2;
+
+      // forget the anchor shortly after the slider stops, so the next zoom uses
+      // wherever the user has panned to by then
+      clearTimeout(this.sliderAnchorTimer);
+      this.sliderAnchorTimer = setTimeout(() => {
+        this.sliderAnchor = null;
+      }, 400);
     },
     zoomIn() {
       const pct = this.currentZoomPercent();
@@ -634,6 +786,50 @@ export default {
       // flower petals reveal via this flag rather than the revealed state (see
       // updateAppearance) — otherwise Reveal all leaves the flower dark.
       this.flowchartStore.revealedAll = true;
+      this.updateAppearance();
+      this.flowchartStore.saveToLocalStorage?.();
+    },
+
+    // "Learn More" and "?" are toggles: press again to close. Opening one closes
+    // the other so the two cards never stack on top of each other.
+    toggleEndPanel() {
+      const open = !this.viewStore.endPanelVisible;
+      this.viewStore.endPanelVisible = open;
+      if (open && this.viewStore.howToVisible) this.closeHowTo();
+    },
+    toggleHowTo() {
+      if (this.viewStore.howToVisible) {
+        this.closeHowTo();
+      } else {
+        this.viewStore.howToVisible = true;
+        this.viewStore.endPanelVisible = false;
+      }
+    },
+    closeHowTo() {
+      this.viewStore.howToVisible = false;
+      this.viewStore.howToDismissed = true;
+    },
+
+    // "Reveal all" works as a toggle: the second press puts back exactly what had
+    // been revealed before, so the user can return to step-by-step exploring.
+    toggleRevealAll() {
+      if (!this.flowchartStore.revealedAll) {
+        this.flowchartStore.preRevealItems = [...this.flowchartStore.revealedItems];
+        this.revealAll();
+        return;
+      }
+
+      this.flowchartStore.revealedItems = this.flowchartStore.preRevealItems || [];
+      this.flowchartStore.preRevealItems = null;
+      this.flowchartStore.revealedAll = false;
+
+      // petals only stay "visited" if the user actually went to them
+      this.flowerNodeIds.forEach(id => {
+        if (!this.flowchartStore.visitedNodes.includes(id)) {
+          this.flowchartStore.flowchartNodes[id]?.element.classList.remove('flower-visited');
+        }
+      });
+
       this.updateAppearance();
       this.flowchartStore.saveToLocalStorage?.();
     },
@@ -1097,6 +1293,10 @@ export default {
     cursor: grabbing;
   }
 
+  // one-finger panning stays native; pinching is handled in JS so only the
+  // flowchart zooms, not the whole page
+  touch-action: pan-x pan-y;
+
   .loader {
     position: fixed;
     top: 0;
@@ -1109,7 +1309,7 @@ export default {
     z-index: 10;
     pointer-events: none;
     background: rgb(var(--background-color));
-    transition: opacity 0.25s var(--transition-timing), visibility 0.25s var(--transition-timing), left 0.25s var(--transition-timing);
+    transition: opacity 0.5s var(--transition-timing), visibility 0.5s var(--transition-timing), left 0.25s var(--transition-timing);
 
     &.panel-visible {
       left: var(--panel-width);
@@ -1127,17 +1327,11 @@ export default {
     }
   }
 
-  .spinner {
-    width: 40px;
-    height: 40px;
-    border: 3px solid rgba(99, 33, 29, 0.2);
-    border-top-color: #63211D;
-    border-radius: 50%;
-    animation: flowchart-spin 0.8s linear infinite;
-  }
-
-  @keyframes flowchart-spin {
-    to { transform: rotate(360deg); }
+  .loading-standalone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
   }
 
   svg {
@@ -1184,7 +1378,10 @@ export default {
         // solid silhouette: hide text glyphs (always rendered as a direct <path> child),
         // keep the background shape and fill it the flower's dark maroon so the
         // whole un-revealed chart reads as one dormant surface.
-        > path {
+        // (repeated glyph shapes are <use> references to a shared path, see
+        // scripts/dedupe-svg-paths.mjs)
+        > path,
+        > use {
           display: none;
         }
 
@@ -1192,7 +1389,7 @@ export default {
         > [id^="Shape"] {
           filter: none;
 
-          path, circle, ellipse {
+          path, use, circle, ellipse {
             fill: #523535;
           }
         }
@@ -1322,20 +1519,15 @@ export default {
     align-items: center;
     justify-content: center;
 
-    &:hover {
-      background: rgba(0, 0, 0, 0.06);
+    @media (hover: hover) {
+      &:hover {
+        background: rgba(0, 0, 0, 0.06);
+      }
     }
 
     &.fit {
       font-size: 14px;
     }
-  }
-
-  .zoom-readout {
-    min-width: 48px;
-    text-align: center;
-    font-variant-numeric: tabular-nums;
-    user-select: none;
   }
 
   .zoom-slider {
@@ -1388,8 +1580,29 @@ export default {
   white-space: nowrap;
   transition: background 0.15s ease;
 
-  &:hover {
-    background: rgba(255, 255, 255, 1);
+  @media (hover: hover) {
+    &:hover {
+      background: rgba(255, 255, 255, 1);
+    }
+  }
+
+  display: inline-grid;
+  align-items: center;
+  justify-items: center;
+
+  > span {
+    grid-area: 1 / 1;
+
+    &.hidden {
+      visibility: hidden;
+    }
+  }
+
+  // after "Reveal all": maroon "Revealed"; pressing again hides things again
+  &.is-revealed,
+  &.is-revealed:hover {
+    background: rgb(var(--accent-color));
+    color: #fff;
   }
 }
 
@@ -1411,8 +1624,10 @@ export default {
   white-space: nowrap;
   transition: background 0.15s ease;
 
-  &:hover {
-    background: rgba(255, 255, 255, 1);
+  @media (hover: hover) {
+    &:hover {
+      background: rgba(255, 255, 255, 1);
+    }
   }
 }
 
@@ -1435,14 +1650,196 @@ export default {
   cursor: pointer;
   transition: background 0.15s ease;
 
-  &:hover {
-    background: rgba(255, 255, 255, 1);
+  @media (hover: hover) {
+    &:hover {
+      background: rgba(255, 255, 255, 1);
+    }
   }
+}
+
+// desktop: buttons sit in one row next to the zoom pill
+.action-buttons {
+  display: contents;
 }
 
 @media (max-width: 600px) {
   .bottom-controls.panel-visible {
     left: 50%;
   }
+
+  // mobile: a full-width bar with its own background along the bottom, and the
+  // flowchart ends above it so nothing is covered. "?" moves to the top right,
+  // opposite the info button, to leave room for the zoom slider.
+  :root {
+    --mobile-bar-height: calc(54px + env(safe-area-inset-bottom));
+  }
+
+  .flowchart,
+  .flowchart .loader {
+    bottom: var(--mobile-bar-height);
+  }
+
+  .bottom-controls,
+  .bottom-controls.panel-visible {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    transform: none;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+    background: rgb(var(--intro-background-color));
+    box-shadow: 0 -1px 0 rgba(var(--text-color), 0.12);
+  }
+
+  .zoom-controls,
+  .reveal-all-btn,
+  .next-steps-btn {
+    box-shadow: none;
+    background: rgba(var(--text-color), 0.07);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  // zoom pill takes whatever room is left; slider stretches to fill it
+  .zoom-controls {
+    flex: 1 1 auto;
+    min-width: 0;
+    gap: 2px;
+    padding: 2px;
+
+    .zoom-btn {
+      flex: none;
+      width: 34px;
+      height: 34px;
+    }
+
+    .zoom-btn.fit {
+      display: none;
+    }
+
+    .zoom-slider {
+      flex: 1 1 auto;
+      width: auto;
+      min-width: 60px;
+      height: 4px;
+
+      // bigger thumb, easier to grab with a finger
+      &::-webkit-slider-thumb {
+        width: 20px;
+        height: 20px;
+      }
+
+      &::-moz-range-thumb {
+        width: 20px;
+        height: 20px;
+      }
+    }
+  }
+
+  .reveal-all-btn.is-revealed {
+    background: rgb(var(--accent-color));
+  }
+
+  .reveal-all-btn,
+  .next-steps-btn {
+    flex: none;
+    height: 38px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+
+  // "?" sits top right, matching the info button top left
+  .help-btn {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    width: 40px;
+    height: 40px;
+    font-size: 18px;
+    color: #fff;
+    background: rgba(var(--text-color), 0.5);
+    box-shadow: 0 0 0 2px rgb(var(--background-color));
+
+  }
+}
+
+// shared loading styles, also used by the "How to use" popup while loading
+.loading-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-align: center;
+  color: rgb(var(--accent-color));
+}
+
+// small spinning ring + "Loading..." with the dots appearing one by one
+.loading-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.loading-ring {
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 1.5px solid rgba(var(--accent-color), 0.18);
+  border-top-color: rgba(var(--accent-color), 0.8);
+  animation: loading-spin 0.9s linear infinite;
+}
+
+.loading-text {
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  color: rgba(var(--accent-color), 0.75);
+}
+
+.loading-dots span {
+  opacity: 0;
+  animation: loading-dot 1.4s infinite;
+
+  &:nth-child(2) { animation-delay: 0.2s; }
+  &:nth-child(3) { animation-delay: 0.4s; }
+}
+
+@keyframes loading-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes loading-dot {
+  0%, 15%   { opacity: 0; }
+  30%, 80%  { opacity: 1; }
+  100%      { opacity: 0; }
+}
+
+// the title is only needed on phones; on desktop the info panel already shows it
+@media (min-width: 601px) {
+  .loading-standalone-title {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-ring {
+    animation-duration: 2.4s;
+  }
+
+  .loading-dots span {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+.loading-fade-enter-active,
+.loading-fade-leave-active {
+  transition: opacity 0.4s var(--transition-timing);
+}
+
+.loading-fade-enter-from,
+.loading-fade-leave-to {
+  opacity: 0;
 }
 </style>

@@ -1,5 +1,8 @@
 <template>
+  <!-- wait for setup.json (tiny) so the popup, title and "Loading..." appear together -->
   <TheFlowchart
+    v-if="setupLoaded"
+    :siteTitle="userSetup.title"
     @setCurrentNodeId="setCurrentNodeId"
     @toggleIntroPanel="toggleIntroPanel"
     @mousedown="toggleIntroPanel(true)"
@@ -9,7 +12,7 @@
     :siteSubtitle="userSetup.subtitle"
     @toggleIntroPanel="toggleIntroPanel()"
   />
-  <TheHowToPopup />
+  <TheHowToPopup v-if="setupLoaded" :siteTitle="userSetup.title" />
   <TheEndPanel />
 </template>
 
@@ -36,7 +39,8 @@ export default {
 
   data() {
     return {
-      userSetup: {}
+      userSetup: {},
+      setupLoaded: false
     }
   },
 
@@ -60,7 +64,10 @@ export default {
           this.userSetup = data;
           this.applyUserSetup();
         })
-        .catch(error => console.log(error));
+        .catch(error => console.log(error))
+        .finally(() => {
+          this.setupLoaded = true;
+        });
     },
     applyUserSetup() {
       this.flowchartStore.flowchartId = this.userSetup.id;

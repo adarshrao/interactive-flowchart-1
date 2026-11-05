@@ -16,6 +16,8 @@ export const useFlowchartStore = defineStore('flowchart', {
     // whether the user hit "Reveal all" — flower petals reveal via this flag
     // (they don't respond to the normal revealed state; see updateAppearance).
     revealedAll: false,
+    // revealedItems as they were just before "Reveal all", so it can be undone
+    preRevealItems: null,
 
     // Properties persisted to localStorage. currentNodeId intentionally excluded
     // so refresh always lands on the first node.
@@ -24,7 +26,8 @@ export const useFlowchartStore = defineStore('flowchart', {
       'revealedItems',
       'visitedNodes',
       'endPanelShown',
-      'revealedAll'
+      'revealedAll',
+      'preRevealItems'
     ],
     resumedFromLocalStorage: false,
     resetActionAvailable: false

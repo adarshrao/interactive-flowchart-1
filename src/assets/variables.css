@@ -1,8 +1,10 @@
 :root {
-  --background-color: 238,238,238;
-  --intro-background-color: 255,255,255;
-  --text-color: 51,51,51;
-  --accent-color: 51,51,51;
+  /* match public/setup.json so the first paint already uses the project colours
+     (setup.json loads a moment later and would otherwise visibly shift them) */
+  --background-color: 215,216,205;
+  --intro-background-color: 255,253,250;
+  --text-color: 77,91,128;
+  --accent-color: 99,33,29;
   --invert-filter: none;
 
   --transition-duration: 0.1s;
