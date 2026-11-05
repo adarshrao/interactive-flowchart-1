@@ -7,10 +7,23 @@
       role="dialog"
       aria-label="How to use this flowchart"
     >
+      <!-- title above the popup (mobile only, first popup on page load only);
+           "Loading..." below while the flowchart loads -->
+      <p v-if="!viewStore.howToDismissed" class="loading-title howto-loading-title" v-text="siteTitle" />
+      <transition name="loading-fade">
+        <div v-if="!viewStore.flowchartLoaded" class="howto-loading" role="status" aria-label="Loading">
+          <span class="loading-indicator"><span class="loading-ring" /><span class="loading-text">Loading<span class="loading-dots"><span>.</span><span>.</span><span>.</span></span></span></span>
+        </div>
+      </transition>
+
       <button class="howto-close" title="Close" @click="dismiss">×</button>
 
       <h2 class="howto-title">How to use</h2>
-      <p class="howto-copy">
+      <p v-if="isTouch" class="howto-copy">
+        Drag to move around this flowchart and tap on the next node, or tap on
+        the panels that are covered to reveal them.
+      </p>
+      <p v-else class="howto-copy">
         Use your mouse to scroll through this flowchart and click on the next
         node, or click on the panels that are covered to reveal them.
       </p>
@@ -25,7 +38,19 @@
           <span class="demo-line demo-line--2"></span>
         </div>
         <span class="demo-ripple"></span>
-        <svg class="demo-cursor" viewBox="0 0 24 24" width="22" height="22">
+        <!-- touch screens: a pointing finger -->
+        <svg v-if="isTouch" class="demo-cursor demo-finger" viewBox="0 0 24 28" width="26" height="30">
+          <path
+            d="M9.5 19V4.5a2 2 0 0 1 4 0v7a2 2 0 0 1 4 0V13a2 2 0 0 1 4 0v5c0 4.4-3 7.5-7.5 7.5h-1.3c-2.5 0-4.3-1-5.8-3.1L3.7 18.6a1.9 1.9 0 0 1 3-2.3Z"
+            fill="#fff"
+            stroke="rgb(var(--text-color))"
+            stroke-width="1.4"
+            stroke-linejoin="round"
+          />
+          <path d="M13.5 11.5V15M17.5 13v2.5" fill="none" stroke="rgb(var(--text-color))" stroke-width="1.2" stroke-linecap="round" />
+        </svg>
+        <!-- mouse: a cursor arrow -->
+        <svg v-else class="demo-cursor" viewBox="0 0 24 24" width="22" height="22">
           <path
             d="M5 3l14 7-6 1.6L9.5 18 5 3z"
             fill="#fff"
@@ -37,6 +62,7 @@
       </div>
 
       <button class="howto-got-it" @click="dismiss">Got it</button>
+      <button class="howto-about" @click="openAbout">About this project</button>
     </div>
   </transition>
 </template>
@@ -49,6 +75,17 @@ import { useViewStore } from '@/stores/ViewStore.js';
 export default {
   name: 'TheHowToPopup',
 
+  props: {
+    siteTitle: String
+  },
+
+  data() {
+    return {
+      // touch devices get tap/drag wording instead of mouse/click
+      isTouch: window.matchMedia('(pointer: coarse)').matches
+    }
+  },
+
   computed: {
     ...mapStores(useViewStore)
   },
@@ -56,6 +93,11 @@ export default {
   methods: {
     dismiss() {
       this.viewStore.howToVisible = false;
+      this.viewStore.howToDismissed = true;
+    },
+    openAbout() {
+      this.dismiss();
+      this.viewStore.introPanelVisible = true;
     },
     // close when the user interacts anywhere outside the popup (but not on the
     // "?" help button, which is what reopens it).
@@ -63,7 +105,10 @@ export default {
       if (!this.viewStore.howToVisible) return;
       if (event.target.closest('.howto')) return;
       if (event.target.closest('.help-btn')) return;
-      this.viewStore.howToVisible = false;
+      // on mobile the intro panel is full-screen and covers this popup, so taps
+      // inside it (e.g. "Start exploring") shouldn't dismiss the popup unseen.
+      if (window.innerWidth <= 600 && event.target.closest('.intro')) return;
+      this.dismiss();
     }
   },
 
@@ -141,6 +186,27 @@ export default {
   font-weight: 600;
 }
 
+.howto-loading-title {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 20px);
+
+  // desktop already shows the title in the open info panel
+  @media (min-width: 601px) {
+    display: none;
+  }
+}
+
+.howto-loading {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 24px);
+  display: flex;
+  justify-content: center;
+}
+
 .howto-copy {
   margin: 0 0 14px;
   font-size: 14px;
@@ -213,6 +279,11 @@ $demo-duration: 4.5s;
   animation: demo-cursor-move $demo-duration linear infinite;
 }
 
+// line the fingertip (not the icon's corner) up with where the cursor tip taps
+.demo-finger {
+  margin: -2px 0 0 -8px;
+}
+
 @keyframes demo-node-reveal {
   0%, 44% {
     background: #37302d;
@@ -263,6 +334,34 @@ $demo-duration: 4.5s;
   .demo-line { opacity: 1; }
   .demo-cursor { transform: translate(6px, 4px); opacity: 1; }
   .demo-ripple { opacity: 0; }
+}
+
+// "About this project" link: mobile only, since on mobile the info panel
+// starts closed and this is the clearest way to find it.
+// "About this project": mobile only, since on mobile the info panel starts
+// closed and this is the clearest way to find it. A quiet outlined button that
+// sits under the solid "Got it".
+.howto-about {
+  display: none;
+}
+
+@media (max-width: 600px) {
+  .howto-about {
+    display: block;
+    width: 100%;
+    height: 38px;
+    margin-top: 8px;
+    padding: 0;
+    appearance: none;
+    border: 1.5px solid rgba(var(--text-color), 0.25);
+    border-radius: 999px;
+    background: transparent;
+    color: rgb(var(--text-color));
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
 }
 
 .howto-got-it {

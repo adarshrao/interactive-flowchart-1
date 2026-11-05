@@ -17,6 +17,9 @@
         </div>
         <div class="description" v-html="description" />
         <p class="attribution">Powered by <a href="https://uclab.fh-potsdam.de/interactive-flowchart/" target="_blank">Interactive Flowchart</a></p>
+        <div class="start-exploring">
+          <button @click="$emit('toggleIntroPanel')">Back to flowchart</button>
+        </div>
       </div>
     </div>
     <button class="close" title="Close introduction" @click="$emit('toggleIntroPanel')"></button>
@@ -123,6 +126,16 @@ button.open {
   top: 16px;
   left: 16px;
   box-shadow: 0 0 0 2px rgb(var(--background-color));
+}
+
+@media (max-width: 600px) {
+  button.open.icon-info {
+    top: 12px;
+    left: 12px;
+    width: 40px;
+    height: 40px;
+    background-size: 20px;
+  }
 }
 
 .intro {
@@ -307,10 +320,78 @@ button.open {
   }
 }
 
+// "Back to flowchart" button: mobile only, where the panel covers the whole
+// screen and hides the flowchart. It sticks to the bottom of the panel.
+.intro .start-exploring {
+  display: none;
+}
+
 @media (max-width: 600px) {
   .intro.visible,
   .intro .inner {
     width: 100vw;
+  }
+
+  // mobile: the panel is full-screen, so instead of growing its width (which
+  // re-wraps and redraws everything each frame and looks jerky) it slides in
+  // and out as one piece, which phones animate smoothly on the GPU.
+  .intro {
+    width: 100vw;
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition:
+      transform 0.42s cubic-bezier(0.32, 0.72, 0, 1),
+      visibility 0s linear 0.42s;
+
+    &.visible {
+      transform: none;
+      visibility: visible;
+      transition:
+        transform 0.42s cubic-bezier(0.32, 0.72, 0, 1),
+        visibility 0s;
+    }
+
+    // content travels with the panel instead of fading separately
+    .inner > *,
+    .inner .instructions *:not(.reset) {
+      opacity: 1;
+      transition: none;
+    }
+  }
+
+  .intro .inner {
+    padding-bottom: 0;
+  }
+
+  .intro .start-exploring {
+    display: block;
+    position: sticky;
+    bottom: 0;
+    margin: 0 -28px;
+    margin-top: 24px;
+    padding: 56px 28px max(20px, env(safe-area-inset-bottom));
+    // long, gradual fade so the text visibly continues behind the button
+    background: linear-gradient(
+      to bottom,
+      rgba(var(--intro-background-color), 0),
+      rgba(var(--intro-background-color), 0.85) 40px,
+      rgb(var(--intro-background-color)) 56px
+    );
+
+    button {
+      display: block;
+      width: 100%;
+      padding: 14px 20px;
+      appearance: none;
+      font: inherit;
+      font-size: 16px;
+      font-weight: 600;
+      border: none;
+      border-radius: 64px;
+      color: #fff;
+      background: rgb(var(--accent-color));
+      cursor: pointer;
+    }
   }
 }
 </style>
